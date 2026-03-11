@@ -209,11 +209,13 @@ def start_bot(ss: SessionState, email, senha, valor, demo, estrategia):
     orig_bot_main = mod.TelaDashboard._bot_main
 
     async def _bot_main_session(self):
+        import traceback as _tb, pathlib as _pl, configparser as _cp
+
         os.environ["QUOTEX_EMAIL"] = email
         os.environ["QUOTEX_SENHA"] = senha
         mod.estado = est
 
-        # Handler 2FA via web (substitui o popup tkinter)
+        # ── Handler 2FA via web ────────────────────────────────────────────
         async def _web_2fa(self_login, data, input_message):
             ss.broadcast({"type": "2fa_required", "message": input_message.strip()})
             ss.log("Aguardando código 2FA do e-mail...", "warn")
@@ -233,22 +235,74 @@ def start_bot(ss: SessionState, email, senha, valor, demo, estrategia):
                 data=data,
             )
 
-        # Repatch: garante que nosso handler web persiste após _bot_main
-        # sobrescrever Login.awaiting_pin com a versão tkinter
+        def _patch_2fa():
+            try:
+                import pyquotex.http.login as _lm
+                _lm.Login.awaiting_pin = _web_2fa
+            except Exception:
+                pass
+
+        _patch_2fa()
+
+        # ── Repatch task ──────────────────────────────────────────────────
         _keep = [True]
         async def _repatch():
             while _keep[0]:
-                try:
-                    import pyquotex.http.login as _lm
-                    if getattr(_lm.Login, "awaiting_pin", None) is not _web_2fa:
-                        _lm.Login.awaiting_pin = _web_2fa
-                except Exception:
-                    pass
+                _patch_2fa()
                 await asyncio.sleep(0.05)
 
+        # ── Gravar config.ini com credenciais ─────────────────────────────
+        try:
+            cfg_path = _pl.Path("settings/config.ini")
+            cfg_path.parent.mkdir(exist_ok=True, parents=True)
+            cfg_ini = _cp.ConfigParser(interpolation=None)
+            cfg_ini["settings"] = {"email": email, "password": senha}
+            with open(cfg_path, "w", encoding="utf-8") as _f:
+                cfg_ini.write(_f)
+        except Exception as e:
+            ss.log(f"Aviso config.ini: {e}", "warn")
+
+        # ── Teste rápido de conexão (25 s) ────────────────────────────────
+        ss.log("Conectando à Quotex…", "info")
+        try:
+            from pyquotex.stable_api import Quotex as _Q
+            _tc = _Q(email=email, password=senha, lang="pt")
+            _result = await asyncio.wait_for(_tc.connect(), timeout=25)
+
+            if isinstance(_result, tuple):
+                _ok, _reason = _result
+            else:
+                _ok, _reason = bool(_result), ("ok" if _result else "falha")
+
+            if not _ok:
+                ss.log(f"❌ Login falhou: {_reason}", "loss")
+                est.rodando = False
+                return
+
+            ss.log("✅ Login OK! Iniciando operações…", "win")
+            try:
+                await _tc.close()
+            except Exception:
+                pass
+            await asyncio.sleep(1)
+
+        except asyncio.TimeoutError:
+            ss.log("⏰ Quotex não respondeu em 25 s. Verifique email/senha e tente novamente.", "loss")
+            est.rodando = False
+            return
+        except Exception as e:
+            ss.log(f"❌ {type(e).__name__}: {e}", "loss")
+            print(f"[CONN ERROR] {_tb.format_exc()}", flush=True)
+            est.rodando = False
+            return
+
+        # ── Bot completo ──────────────────────────────────────────────────
         _pt = asyncio.ensure_future(_repatch())
         try:
             await orig_bot_main(self)
+        except Exception as e:
+            ss.log(f"❌ Erro no bot: {e}", "loss")
+            print(f"[BOT ERROR] {_tb.format_exc()}", flush=True)
         finally:
             _keep[0] = False
             _pt.cancel()
