@@ -1,0 +1,3 @@
+pyquotex
+flask
+flask-sock

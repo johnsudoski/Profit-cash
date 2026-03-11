@@ -1,0 +1,946 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no,viewport-fit=cover">
+<meta name="theme-color" content="#000000">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black">
+<meta name="apple-mobile-web-app-title" content="Profit Cash">
+<link rel="manifest" href="/manifest.json">
+<title>Profit Cash</title>
+<style>
+/* ─── RESET & BASE ──────────────────────────────────────────────────────────── */
+*{box-sizing:border-box;margin:0;padding:0;-webkit-tap-highlight-color:transparent}
+:root{
+  /* Apple Dark Mode Palette */
+  --bg:          #000000;
+  --bg2:         #1C1C1E;
+  --bg3:         #2C2C2E;
+  --bg4:         #3A3A3C;
+  --sep:         rgba(84,84,88,0.65);
+  --sep-opaque:  #38383A;
+  --fill:        rgba(120,120,128,0.36);
+  --fill2:       rgba(120,120,128,0.32);
+  --fill3:       rgba(118,118,128,0.24);
+  --fill4:       rgba(116,116,128,0.18);
+
+  /* Labels */
+  --lbl:    #FFFFFF;
+  --lbl2:   rgba(235,235,245,0.60);
+  --lbl3:   rgba(235,235,245,0.30);
+  --lbl4:   rgba(235,235,245,0.18);
+
+  /* System Colors */
+  --blue:   #0A84FF;
+  --green:  #30D158;
+  --red:    #FF453A;
+  --yellow: #FFD60A;
+  --orange: #FF9F0A;
+  --purple: #BF5AF2;
+  --teal:   #40CBE0;
+
+  /* UI */
+  --r:      12px;
+  --r-lg:   20px;
+  --r-full: 100px;
+  --shadow: 0 2px 20px rgba(0,0,0,.55);
+}
+
+html,body{
+  height:100%;
+  font-family:-apple-system,BlinkMacSystemFont,'SF Pro Text','SF Pro Display',system-ui,sans-serif;
+  background:var(--bg);
+  color:var(--lbl);
+  overflow-x:hidden;
+  -webkit-font-smoothing:antialiased;
+}
+
+/* ─── LAYOUT ─────────────────────────────────────────────────────────────────*/
+.page{
+  min-height:100dvh;
+  padding-bottom:env(safe-area-inset-bottom,24px);
+}
+
+.container{
+  max-width:430px;
+  margin:0 auto;
+  padding:0 16px;
+}
+
+/* ─── HEADER ─────────────────────────────────────────────────────────────────*/
+.nav{
+  position:sticky;
+  top:0;
+  z-index:100;
+  background:rgba(0,0,0,.72);
+  backdrop-filter:saturate(180%) blur(20px);
+  -webkit-backdrop-filter:saturate(180%) blur(20px);
+  border-bottom:0.5px solid var(--sep);
+}
+.nav-inner{
+  max-width:430px;
+  margin:0 auto;
+  display:flex;
+  align-items:center;
+  justify-content:space-between;
+  padding:14px 20px;
+  padding-top:calc(14px + env(safe-area-inset-top,0px));
+}
+.nav-title{
+  font-size:17px;
+  font-weight:600;
+  letter-spacing:-0.4px;
+}
+.nav-title span{color:var(--green)}
+
+.status-pill{
+  display:flex;
+  align-items:center;
+  gap:6px;
+  padding:5px 12px;
+  background:var(--fill4);
+  border-radius:var(--r-full);
+  font-size:13px;
+  font-weight:500;
+  color:var(--lbl2);
+  border:0.5px solid var(--sep);
+}
+.status-dot{
+  width:7px;height:7px;
+  border-radius:50%;
+  background:var(--bg4);
+  flex-shrink:0;
+  transition:background .4s,box-shadow .4s;
+}
+.status-dot.on{
+  background:var(--green);
+  box-shadow:0 0 0 3px rgba(48,209,88,.25);
+  animation:pulse-dot 2s ease-in-out infinite;
+}
+.status-dot.off{background:var(--red)}
+.status-dot.connecting{
+  background:var(--yellow);
+  animation:pulse-dot 1s ease-in-out infinite;
+}
+@keyframes pulse-dot{0%,100%{opacity:1}50%{opacity:.4}}
+
+/* ─── SECTION HEADER ─────────────────────────────────────────────────────────*/
+.section-title{
+  font-size:13px;
+  font-weight:600;
+  letter-spacing:0.06em;
+  text-transform:uppercase;
+  color:var(--lbl3);
+  padding:0 4px;
+  margin-bottom:8px;
+}
+
+/* ─── CARD ───────────────────────────────────────────────────────────────────*/
+.card{
+  background:var(--bg2);
+  border-radius:var(--r-lg);
+  overflow:hidden;
+}
+.card-pad{padding:16px}
+
+/* ─── METRICS ROW ────────────────────────────────────────────────────────────*/
+.metrics{
+  display:grid;
+  grid-template-columns:1fr 1fr;
+  gap:2px;
+  background:var(--sep-opaque);
+  border-radius:var(--r-lg);
+  overflow:hidden;
+}
+.metric{
+  background:var(--bg2);
+  padding:16px 14px;
+  display:flex;
+  flex-direction:column;
+  gap:4px;
+}
+.metric-val{
+  font-size:22px;
+  font-weight:700;
+  letter-spacing:-0.5px;
+  line-height:1;
+}
+.metric-lbl{
+  font-size:12px;
+  color:var(--lbl3);
+  font-weight:500;
+  letter-spacing:0.03em;
+}
+.metric-val.green{color:var(--green)}
+.metric-val.red  {color:var(--red)}
+.metric-val.blue {color:var(--blue)}
+.metric-val.yellow{color:var(--yellow)}
+
+/* ─── SIGNAL CARD ────────────────────────────────────────────────────────────*/
+.signal-card{
+  background:var(--bg2);
+  border-radius:var(--r-lg);
+  padding:24px 20px 20px;
+  text-align:center;
+  position:relative;
+  overflow:hidden;
+}
+.signal-card::before{
+  content:'';
+  position:absolute;
+  top:0;left:0;right:0;
+  height:3px;
+  background:var(--sep);
+  transition:background .4s;
+}
+.signal-card.call-active::before{background:var(--green)}
+.signal-card.put-active::before {background:var(--red)}
+
+.signal-eyebrow{
+  font-size:11px;
+  font-weight:600;
+  letter-spacing:0.12em;
+  text-transform:uppercase;
+  color:var(--lbl3);
+  margin-bottom:10px;
+}
+.signal-main{
+  font-size:42px;
+  font-weight:800;
+  letter-spacing:-1px;
+  line-height:1;
+  color:var(--lbl3);
+  transition:color .35s,text-shadow .35s;
+}
+.signal-main.call{color:var(--green);text-shadow:0 0 40px rgba(48,209,88,.35)}
+.signal-main.put {color:var(--red); text-shadow:0 0 40px rgba(255,69,58,.35)}
+
+.signal-asset{
+  font-size:15px;
+  font-weight:600;
+  color:var(--blue);
+  margin-top:6px;
+  letter-spacing:0.02em;
+}
+.signal-conf{
+  font-size:14px;
+  color:var(--lbl2);
+  margin-top:4px;
+}
+.signal-reason{
+  font-size:13px;
+  color:var(--lbl3);
+  margin-top:6px;
+  min-height:18px;
+}
+
+/* Progress bar */
+.prog-track{
+  height:4px;
+  background:var(--fill3);
+  border-radius:var(--r-full);
+  margin:14px 0 10px;
+  overflow:hidden;
+}
+.prog-fill{
+  height:100%;
+  border-radius:var(--r-full);
+  width:0%;
+  transition:width .5s cubic-bezier(.4,0,.2,1),background .4s;
+  background:var(--fill2);
+}
+.prog-fill.call{background:linear-gradient(90deg,#28B14D,#30D158)}
+.prog-fill.put {background:linear-gradient(90deg,#D93025,#FF453A)}
+
+/* Vote badges */
+.votes{
+  display:flex;
+  flex-wrap:wrap;
+  justify-content:center;
+  gap:5px;
+  margin-top:8px;
+}
+.vote-badge{
+  font-size:11px;
+  font-weight:600;
+  padding:3px 9px;
+  border-radius:var(--r-full);
+  background:rgba(10,132,255,.15);
+  color:var(--blue);
+  border:0.5px solid rgba(10,132,255,.25);
+}
+
+/* ─── FORM ───────────────────────────────────────────────────────────────────*/
+.form-card{
+  background:var(--bg2);
+  border-radius:var(--r-lg);
+  overflow:hidden;
+}
+
+.form-row{
+  display:flex;
+  align-items:center;
+  padding:12px 16px;
+  border-bottom:0.5px solid var(--sep);
+  gap:12px;
+  min-height:52px;
+}
+.form-row:last-child{border-bottom:none}
+
+.form-label{
+  font-size:15px;
+  font-weight:400;
+  color:var(--lbl);
+  flex-shrink:0;
+  min-width:68px;
+}
+
+.form-input{
+  flex:1;
+  background:transparent;
+  border:none;
+  outline:none;
+  font-size:15px;
+  font-family:inherit;
+  color:var(--lbl);
+  text-align:right;
+  -webkit-appearance:none;
+  appearance:none;
+}
+.form-input::placeholder{color:var(--lbl3)}
+.form-input::-webkit-outer-spin-button,
+.form-input::-webkit-inner-spin-button{-webkit-appearance:none;margin:0}
+
+.form-select{
+  background:transparent;
+  border:none;
+  outline:none;
+  font-size:15px;
+  font-family:inherit;
+  color:var(--lbl);
+  text-align:right;
+  -webkit-appearance:none;
+  appearance:none;
+  cursor:pointer;
+}
+.form-select option{background:var(--bg3);color:var(--lbl)}
+
+.form-icon{
+  font-size:18px;
+  width:32px;
+  height:32px;
+  display:flex;align-items:center;justify-content:center;
+  background:var(--fill3);
+  border-radius:8px;
+  flex-shrink:0;
+}
+
+/* ─── STRATEGY PICKER ────────────────────────────────────────────────────────*/
+.strat-grid{
+  display:grid;
+  grid-template-columns:repeat(3,1fr);
+  gap:8px;
+}
+.strat-btn{
+  background:var(--bg3);
+  border:1.5px solid transparent;
+  border-radius:var(--r);
+  padding:12px 6px;
+  text-align:center;
+  cursor:pointer;
+  transition:all .18s cubic-bezier(.4,0,.2,1);
+  -webkit-tap-highlight-color:transparent;
+  user-select:none;
+}
+.strat-btn:active{transform:scale(.95);opacity:.75}
+.strat-btn.active{
+  border-color:var(--blue);
+  background:rgba(10,132,255,.12);
+}
+.strat-emoji{
+  font-size:24px;
+  display:block;
+  margin-bottom:5px;
+  line-height:1;
+}
+.strat-name{
+  font-size:12px;
+  font-weight:600;
+  color:var(--lbl2);
+}
+.strat-btn.active .strat-name{color:var(--blue)}
+
+/* ─── BUTTONS ────────────────────────────────────────────────────────────────*/
+.btn{
+  display:flex;
+  align-items:center;
+  justify-content:center;
+  gap:8px;
+  width:100%;
+  padding:16px;
+  border:none;
+  border-radius:var(--r-lg);
+  font-size:17px;
+  font-weight:600;
+  font-family:inherit;
+  cursor:pointer;
+  letter-spacing:-0.2px;
+  transition:transform .15s cubic-bezier(.4,0,.2,1),opacity .15s,box-shadow .25s;
+  -webkit-tap-highlight-color:transparent;
+  user-select:none;
+}
+.btn:active{transform:scale(.97);opacity:.88}
+.btn:disabled{opacity:.35;cursor:not-allowed;transform:none!important}
+
+.btn-start{
+  background:var(--green);
+  color:#fff;
+  box-shadow:0 4px 24px rgba(48,209,88,.30);
+}
+.btn-start:not(:disabled):hover{box-shadow:0 6px 32px rgba(48,209,88,.45)}
+
+.btn-stop{
+  background:var(--red);
+  color:#fff;
+  box-shadow:0 4px 24px rgba(255,69,58,.30);
+}
+
+.btn-link{
+  background:rgba(10,132,255,.12);
+  color:var(--blue);
+  font-size:15px;
+  padding:13px;
+  border-radius:var(--r);
+  border:0.5px solid rgba(10,132,255,.25);
+}
+
+/* ─── SPINNER ────────────────────────────────────────────────────────────────*/
+.spin{
+  width:18px;height:18px;
+  border:2.5px solid rgba(255,255,255,.25);
+  border-top-color:rgba(255,255,255,.85);
+  border-radius:50%;
+  animation:spin .7s linear infinite;
+  flex-shrink:0;
+}
+@keyframes spin{to{transform:rotate(360deg)}}
+
+/* ─── INFO CALLOUT ───────────────────────────────────────────────────────────*/
+.callout{
+  display:flex;
+  align-items:flex-start;
+  gap:10px;
+  background:rgba(10,132,255,.10);
+  border:0.5px solid rgba(10,132,255,.22);
+  border-radius:var(--r);
+  padding:12px 14px;
+  font-size:13px;
+  color:rgba(235,235,245,.70);
+  line-height:1.5;
+}
+.callout-icon{font-size:16px;flex-shrink:0;margin-top:1px}
+
+/* ─── TABS ───────────────────────────────────────────────────────────────────*/
+.tabs{
+  display:flex;
+  background:var(--fill3);
+  border-radius:10px;
+  padding:2px;
+  margin-bottom:12px;
+}
+.tab{
+  flex:1;
+  padding:7px;
+  text-align:center;
+  border-radius:9px;
+  font-size:13px;
+  font-weight:600;
+  color:var(--lbl2);
+  cursor:pointer;
+  transition:all .18s;
+  user-select:none;
+}
+.tab.active{
+  background:var(--bg3);
+  color:var(--lbl);
+  box-shadow:0 1px 4px rgba(0,0,0,.35);
+}
+.tab-panel{display:none}
+.tab-panel.active{display:block}
+
+/* ─── LOG ────────────────────────────────────────────────────────────────────*/
+.log-box{
+  height:210px;
+  overflow-y:auto;
+  background:var(--bg);
+  border-radius:var(--r);
+  padding:10px 12px;
+  scroll-behavior:smooth;
+}
+.log-box::-webkit-scrollbar{width:3px}
+.log-box::-webkit-scrollbar-thumb{background:var(--fill2);border-radius:3px}
+
+.log-line{
+  font-size:12.5px;
+  font-family:'SF Mono','Menlo','Monaco','Courier New',monospace;
+  line-height:1.7;
+  color:var(--lbl3);
+  border-bottom:0.5px solid rgba(255,255,255,.03);
+  padding-bottom:1px;
+}
+.log-line.win  {color:var(--green)}
+.log-line.loss {color:var(--red)}
+.log-line.warn {color:var(--yellow)}
+.log-line.info {color:var(--blue)}
+.log-line.grey {color:var(--lbl4)}
+
+/* ─── TRADE HISTORY ──────────────────────────────────────────────────────────*/
+.trade-list{max-height:210px;overflow-y:auto}
+.trade-list::-webkit-scrollbar{width:3px}
+.trade-list::-webkit-scrollbar-thumb{background:var(--fill2);border-radius:3px}
+.trade-item{
+  display:flex;
+  align-items:center;
+  justify-content:space-between;
+  padding:11px 0;
+  border-bottom:0.5px solid var(--sep);
+  font-size:14px;
+}
+.trade-item:last-child{border-bottom:none}
+.trade-dir{
+  font-weight:700;
+  font-size:11px;
+  padding:3px 9px;
+  border-radius:var(--r-full);
+  letter-spacing:0.03em;
+}
+.trade-dir.call{background:rgba(48,209,88,.15);color:var(--green)}
+.trade-dir.put {background:rgba(255,69,58,.15);color:var(--red)}
+.trade-asset{font-weight:600;margin-left:8px;color:var(--lbl)}
+.trade-amount{font-size:12px;color:var(--lbl3);margin-top:2px}
+.trade-result{font-size:13px;font-weight:700}
+.trade-result.win{color:var(--green)}
+.trade-result.loss{color:var(--red)}
+.trade-result.pending{color:var(--yellow)}
+.trade-empty{
+  text-align:center;
+  padding:28px 0;
+  font-size:14px;
+  color:var(--lbl3);
+}
+
+/* ─── TOAST ──────────────────────────────────────────────────────────────────*/
+#toast{
+  position:fixed;
+  bottom:calc(28px + env(safe-area-inset-bottom,0px));
+  left:50%;
+  transform:translateX(-50%) translateY(72px);
+  background:rgba(44,44,46,.96);
+  border:0.5px solid var(--sep);
+  border-radius:var(--r-full);
+  padding:11px 22px;
+  font-size:14px;
+  font-weight:500;
+  color:var(--lbl);
+  z-index:9999;
+  backdrop-filter:blur(20px);
+  -webkit-backdrop-filter:blur(20px);
+  box-shadow:0 4px 24px rgba(0,0,0,.6);
+  white-space:nowrap;
+  transition:transform .28s cubic-bezier(.34,1.56,.64,1);
+  pointer-events:none;
+}
+#toast.show{transform:translateX(-50%) translateY(0)}
+
+/* ─── SPACING HELPERS ────────────────────────────────────────────────────────*/
+.mt4 {margin-top:4px}
+.mt8 {margin-top:8px}
+.mt12{margin-top:12px}
+.mt16{margin-top:16px}
+.mt20{margin-top:20px}
+.mt24{margin-top:24px}
+.pb16{padding-bottom:16px}
+.gap8{display:flex;flex-direction:column;gap:8px}
+.gap12{display:flex;flex-direction:column;gap:12px}
+.gap16{display:flex;flex-direction:column;gap:16px}
+
+/* ─── RESPONSIVE (Tablet) ────────────────────────────────────────────────────*/
+@media(min-width:768px){
+  .container{max-width:860px}
+  .two-col{display:grid;grid-template-columns:1fr 1fr;gap:16px;align-items:start}
+  .full-col{grid-column:1/-1}
+  .log-box{height:280px}
+}
+</style>
+</head>
+<body>
+
+<!-- HEADER -->
+<nav class="nav">
+  <div class="nav-inner">
+    <div class="nav-title">Profit <span>Cash</span></div>
+    <div class="status-pill">
+      <span class="status-dot" id="dot"></span>
+      <span id="stxt">Desconectado</span>
+    </div>
+  </div>
+</nav>
+
+<!-- PAGE -->
+<div class="page">
+<div class="container">
+
+  <div class="mt16 gap16 two-col" id="layout">
+
+    <!-- ── ESQUERDA ─────────────────────────────────── -->
+    <div class="gap16">
+
+      <!-- MÉTRICAS -->
+      <div>
+        <div class="section-title">Sessão</div>
+        <div class="metrics">
+          <div class="metric">
+            <div class="metric-val green" id="saldo">R$ 0,00</div>
+            <div class="metric-lbl">Saldo</div>
+          </div>
+          <div class="metric">
+            <div class="metric-val" id="lucro" style="color:var(--lbl3)">R$ 0,00</div>
+            <div class="metric-lbl">Lucro</div>
+          </div>
+          <div class="metric">
+            <div class="metric-val blue" id="wr">—%</div>
+            <div class="metric-lbl">Win Rate</div>
+          </div>
+          <div class="metric">
+            <div class="metric-val yellow" id="trades">0W / 0L</div>
+            <div class="metric-lbl">Operações</div>
+          </div>
+        </div>
+      </div>
+
+      <!-- SINAL IA -->
+      <div>
+        <div class="section-title">Análise IA</div>
+        <div class="signal-card" id="signal-card">
+          <div class="signal-eyebrow">Ensemble · 12 modelos</div>
+          <div class="signal-main" id="sa">AGUARDANDO</div>
+          <div class="signal-asset" id="satv"></div>
+          <div class="prog-track">
+            <div class="prog-fill" id="cb"></div>
+          </div>
+          <div class="signal-conf" id="sc">Conecte sua conta para receber sinais</div>
+          <div class="signal-reason" id="sm"></div>
+          <div class="votes" id="sv"></div>
+        </div>
+      </div>
+
+    </div>
+
+    <!-- ── DIREITA ──────────────────────────────────── -->
+    <div class="gap16">
+
+      <!-- CONFIGURAÇÃO -->
+      <div>
+        <div class="section-title">Configuração</div>
+
+        <!-- Form -->
+        <div class="form-card">
+          <div class="form-row">
+            <div class="form-icon">✉️</div>
+            <label class="form-label" for="email">Email</label>
+            <input class="form-input" type="email" id="email"
+              placeholder="seu@email.com" autocomplete="email"
+              inputmode="email">
+          </div>
+          <div class="form-row">
+            <div class="form-icon">🔒</div>
+            <label class="form-label" for="senha">Senha</label>
+            <input class="form-input" type="password" id="senha"
+              placeholder="••••••••" autocomplete="current-password">
+          </div>
+          <div class="form-row">
+            <div class="form-icon">💵</div>
+            <label class="form-label" for="valor">Valor</label>
+            <input class="form-input" type="number" id="valor"
+              value="5" min="1" step="1" placeholder="5">
+          </div>
+          <div class="form-row">
+            <div class="form-icon">📊</div>
+            <label class="form-label" for="demo">Conta</label>
+            <select class="form-select" id="demo">
+              <option value="true">Demo 🧪</option>
+              <option value="false">Real 💰</option>
+            </select>
+          </div>
+        </div>
+
+        <!-- Estratégia -->
+        <div class="mt12">
+          <div class="strat-grid">
+            <div class="strat-btn active" data-e="cautelosa" onclick="selStrat(this)">
+              <span class="strat-emoji">🛡️</span>
+              <span class="strat-name">Cautelosa</span>
+            </div>
+            <div class="strat-btn" data-e="moderada" onclick="selStrat(this)">
+              <span class="strat-emoji">⚖️</span>
+              <span class="strat-name">Moderada</span>
+            </div>
+            <div class="strat-btn" data-e="agressiva" onclick="selStrat(this)">
+              <span class="strat-emoji">🔥</span>
+              <span class="strat-name">Agressiva</span>
+            </div>
+          </div>
+        </div>
+
+        <!-- Botões de ação -->
+        <div class="mt12 gap8">
+          <button class="btn btn-start" id="bstart" onclick="startBot()">
+            ▶ &nbsp;Iniciar Robô
+          </button>
+          <button class="btn btn-stop" id="bstop" onclick="stopBot()" style="display:none">
+            ■ &nbsp;Parar Robô
+          </button>
+        </div>
+
+        <!-- Callout info -->
+        <div class="callout mt12">
+          <span class="callout-icon">ℹ️</span>
+          <span>Não tem conta? <a href="https://quotex.com/sign-up" target="_blank"
+            style="color:var(--blue);text-decoration:none;font-weight:600">Crie gratuitamente na Quotex</a>
+            e use as credenciais acima.</span>
+        </div>
+
+      </div>
+
+      <!-- LOG / HISTÓRICO -->
+      <div class="full-col">
+        <div class="section-title">Atividade</div>
+        <div class="card card-pad">
+          <div class="tabs">
+            <div class="tab active" onclick="switchTab('log',this)">📋  Log</div>
+            <div class="tab" onclick="switchTab('hist',this)">📈  Histórico</div>
+          </div>
+          <div class="tab-panel active" id="tp-log">
+            <div class="log-box" id="logbox"></div>
+          </div>
+          <div class="tab-panel" id="tp-hist">
+            <div class="trade-list" id="histbox">
+              <div class="trade-empty">Sem operações ainda</div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+    </div>
+  </div>
+
+  <div style="height:32px"></div>
+</div><!-- /container -->
+</div><!-- /page -->
+
+<div id="toast"></div>
+
+<script>
+// ── Sessão ───────────────────────────────────────────────────────────────────
+let SID = localStorage.getItem('pcSid');
+if (!SID) { SID = crypto.randomUUID(); localStorage.setItem('pcSid', SID); }
+
+const API    = `${location.protocol}//${location.host}`;
+const WS_URL = `${location.protocol==='https:'?'wss':'ws'}://${location.host}/ws/${SID}`;
+
+let ws, estrategia = 'cautelosa', tradeHist = [], reconnT;
+
+// ── WebSocket ─────────────────────────────────────────────────────────────────
+function connectWS() {
+  ws = new WebSocket(WS_URL);
+  ws.onopen  = () => { clearTimeout(reconnT); setConn('on'); };
+  ws.onmessage = e => handle(JSON.parse(e.data));
+  ws.onclose = () => { setConn('off'); reconnT = setTimeout(connectWS, 3000); };
+  ws.onerror = () => ws.close();
+}
+
+function handle(m) {
+  if      (m.type === 'estado')    updEstado(m.data);
+  else if (m.type === 'log')       addLog(m.text, m.tag);
+  else if (m.type === 'sinal')     updSinal(m);
+  else if (m.type === 'trade')     addTrade(m);
+  else if (m.type === 'resultado') updResult(m);
+}
+
+// ── Estado ────────────────────────────────────────────────────────────────────
+function updEstado(d) {
+  const lucro = d.lucro ?? 0;
+  const wins  = d.wins  ?? 0;
+  const losses= d.losses?? 0;
+  const total = wins + losses;
+  const wr    = total > 0 ? Math.round(wins / total * 100) : null;
+
+  el('saldo').textContent = fmt(d.saldo ?? 0);
+
+  const le = el('lucro');
+  le.textContent = fmt(lucro, true);
+  le.className   = 'metric-val ' + (lucro >= 0 ? 'green' : 'red');
+
+  const we = el('wr');
+  we.textContent = wr !== null ? wr + '%' : '—%';
+  we.className   = 'metric-val ' + (wr === null ? 'blue' : wr >= 60 ? 'green' : wr >= 40 ? 'yellow' : 'red');
+
+  el('trades').textContent = `${wins}W / ${losses}L`;
+
+  const running = !!d.rodando;
+  el('bstart').style.display = running ? 'none'  : 'flex';
+  el('bstop') .style.display = running ? 'flex'  : 'none';
+  if (!running) {
+    el('bstart').disabled = false;
+    el('bstart').innerHTML = '▶ &nbsp;Iniciar Robô';
+  }
+}
+
+// ── Sinal ─────────────────────────────────────────────────────────────────────
+function updSinal(m) {
+  const action = (m.action || 'HOLD').toUpperCase();
+  const conf   = m.conf ?? 0;
+  const card   = el('signal-card');
+
+  el('sa').textContent = action === 'HOLD' ? 'AGUARDANDO' : action;
+  el('sa').className   = 'signal-main ' + (action === 'CALL' ? 'call' : action === 'PUT' ? 'put' : '');
+
+  card.className = 'signal-card ' +
+    (action === 'CALL' ? 'call-active' : action === 'PUT' ? 'put-active' : '');
+
+  el('satv').textContent  = m.ativo || '';
+  el('sc').textContent    = action !== 'HOLD' ? `Confiança: ${Math.round(conf * 100)}%` : 'Analisando mercado…';
+  el('sm').textContent    = m.motivo || '';
+
+  const cb = el('cb');
+  cb.style.width = Math.round(conf * 100) + '%';
+  cb.className   = 'prog-fill ' + (action === 'CALL' ? 'call' : action === 'PUT' ? 'put' : '');
+
+  el('sv').innerHTML = (m.votos || []).slice(0, 6)
+    .map(v => `<span class="vote-badge">${v}</span>`).join('');
+}
+
+// ── Log ───────────────────────────────────────────────────────────────────────
+function addLog(txt, tag) {
+  const b = el('logbox');
+  const d = document.createElement('div');
+  d.className = 'log-line ' + (tag || 'info');
+  const ts = new Date().toLocaleTimeString('pt-BR', {
+    hour: '2-digit', minute: '2-digit', second: '2-digit'
+  });
+  d.textContent = `[${ts}]  ${txt}`;
+  b.appendChild(d);
+  if (b.children.length > 500) b.removeChild(b.firstChild);
+  b.scrollTop = b.scrollHeight;
+}
+
+// ── Histórico ─────────────────────────────────────────────────────────────────
+function addTrade(m) { tradeHist.unshift(m); renderHist(); }
+
+function updResult(m) {
+  const t = tradeHist.find(t => t.id === m.id);
+  if (t) { t.resultado = m.resultado; t.lucro = m.lucro; renderHist(); }
+}
+
+function renderHist() {
+  if (!tradeHist.length) return;
+  el('histbox').innerHTML = tradeHist.slice(0, 40).map(t => `
+    <div class="trade-item">
+      <div style="display:flex;align-items:center">
+        <span class="trade-dir ${t.direcao}">${t.direcao.toUpperCase()}</span>
+        <span class="trade-asset">${t.ativo}</span>
+      </div>
+      <div style="text-align:right">
+        ${t.valor ? `<div class="trade-amount">R$ ${t.valor.toFixed(2)}</div>` : ''}
+        <div class="trade-result ${t.resultado === 'W' ? 'win' : t.resultado === 'L' ? 'loss' : 'pending'}">
+          ${t.resultado === 'W' ? '✓ WIN' : t.resultado === 'L' ? '✗ LOSS' : '● '}
+        </div>
+      </div>
+    </div>`).join('');
+}
+
+// ── Ações ─────────────────────────────────────────────────────────────────────
+async function startBot() {
+  const email = el('email').value.trim();
+  const senha = el('senha').value.trim();
+  const valor = parseFloat(el('valor').value) || 5;
+  const demo  = el('demo').value === 'true';
+
+  if (!email) { toast('Informe seu email da Quotex'); el('email').focus(); return; }
+  if (!senha) { toast('Informe sua senha da Quotex'); el('senha').focus(); return; }
+
+  el('bstart').disabled = true;
+  el('bstart').innerHTML = '<span class="spin"></span>&nbsp; Conectando…';
+
+  try {
+    const r = await fetch(`${API}/api/start`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ email, senha, valor, demo, estrategia, sid: SID })
+    });
+    const d = await r.json();
+    if (!d.ok) throw new Error(d.error || 'Erro ao iniciar');
+    toast('Robô iniciado ✓');
+    addLog('Conectando à Quotex…', 'info');
+  } catch (e) {
+    toast('Erro: ' + e.message);
+    el('bstart').disabled = false;
+    el('bstart').innerHTML = '▶ &nbsp;Iniciar Robô';
+  }
+}
+
+async function stopBot() {
+  try {
+    await fetch(`${API}/api/stop`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ sid: SID })
+    });
+    toast('Robô parado');
+  } catch { toast('Erro ao parar'); }
+}
+
+// ── Helpers ───────────────────────────────────────────────────────────────────
+function selStrat(btn) {
+  document.querySelectorAll('.strat-btn').forEach(b => b.classList.remove('active'));
+  btn.classList.add('active');
+  estrategia = btn.dataset.e;
+}
+
+function setConn(state) {
+  const dot  = el('dot');
+  const stxt = el('stxt');
+  dot.className = 'status-dot ' + state;
+  stxt.textContent = state === 'on' ? 'Conectado' : state === 'connecting' ? 'Conectando…' : 'Desconectado';
+}
+
+function fmt(v, signed = false) {
+  const abs = 'R$ ' + Math.abs(v).toLocaleString('pt-BR', {
+    minimumFractionDigits: 2, maximumFractionDigits: 2
+  });
+  if (!signed) return abs;
+  return (v >= 0 ? '+' : '−') + abs;
+}
+
+function toast(msg, dur = 2800) {
+  const t = el('toast');
+  t.textContent = msg;
+  t.classList.add('show');
+  setTimeout(() => t.classList.remove('show'), dur);
+}
+
+function el(id) { return document.getElementById(id); }
+
+function switchTab(name, btn) {
+  document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+  document.querySelectorAll('.tab-panel').forEach(t => t.classList.remove('active'));
+  btn.classList.add('active');
+  el('tp-' + name).classList.add('active');
+}
+
+// Conectar WS ao carregar
+connectWS();
+</script>
+</body>
+</html>
