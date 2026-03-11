@@ -761,11 +761,12 @@ function connectWS() {
 }
 
 function handle(m) {
-  if      (m.type === 'estado')    updEstado(m.data);
-  else if (m.type === 'log')       addLog(m.text, m.tag);
-  else if (m.type === 'sinal')     updSinal(m);
-  else if (m.type === 'trade')     addTrade(m);
-  else if (m.type === 'resultado') updResult(m);
+  if      (m.type === 'estado')       updEstado(m.data);
+  else if (m.type === 'log')          addLog(m.text, m.tag);
+  else if (m.type === 'sinal')        updSinal(m);
+  else if (m.type === 'trade')        addTrade(m);
+  else if (m.type === 'resultado')    updResult(m);
+  else if (m.type === '2fa_required') show2FA(m.message);
 }
 
 // ── Estado ────────────────────────────────────────────────────────────────────
@@ -939,8 +940,52 @@ function switchTab(name, btn) {
   el('tp-' + name).classList.add('active');
 }
 
+// ── 2FA ──────────────────────────────────────────────────────────────────────
+function show2FA(msg) {
+  el('tfa-msg').textContent = msg || 'Verifique seu e-mail e insira o código enviado pela Quotex.';
+  el('tfa-input').value = '';
+  el('tfa-overlay').style.display = 'flex';
+  setTimeout(() => el('tfa-input').focus(), 100);
+}
+
+async function submit2FA() {
+  const code = el('tfa-input').value.trim();
+  if (!code) return;
+  el('tfa-btn').disabled = true;
+  el('tfa-btn').textContent = 'Enviando…';
+  await fetch(`${API}/api/2fa`, {
+    method: 'POST',
+    headers: {'Content-Type':'application/json'},
+    body: JSON.stringify({ code, sid: SID })
+  });
+  el('tfa-overlay').style.display = 'none';
+  el('tfa-btn').disabled = false;
+  el('tfa-btn').textContent = 'Confirmar';
+  addLog('Código 2FA enviado.', 'info');
+}
+
+el('tfa-input').addEventListener('keydown', e => { if (e.key === 'Enter') submit2FA(); });
+
 // Conectar WS ao carregar
 connectWS();
 </script>
+
+<!-- ── Modal 2FA ─────────────────────────────────────────────────────────── -->
+<div id="tfa-overlay" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.75);z-index:999;align-items:center;justify-content:center;backdrop-filter:blur(6px);">
+  <div style="background:#1C1C1E;border-radius:20px;padding:32px 28px;width:min(360px,90vw);text-align:center;box-shadow:0 24px 64px rgba(0,0,0,.6);">
+    <div style="font-size:36px;margin-bottom:12px;">🔐</div>
+    <h2 style="color:#fff;font-size:18px;font-weight:700;margin:0 0 8px;">Verificação de Segurança</h2>
+    <p id="tfa-msg" style="color:#8E8E93;font-size:13px;margin:0 0 24px;line-height:1.5;">Verifique seu e-mail e insira o código da Quotex.</p>
+    <input id="tfa-input" type="text" inputmode="numeric" maxlength="8" placeholder="000000"
+      style="width:100%;box-sizing:border-box;background:#2C2C2E;border:1.5px solid #3A3A3C;border-radius:12px;color:#fff;font-size:28px;font-weight:700;text-align:center;padding:14px;letter-spacing:8px;outline:none;margin-bottom:16px;"
+      onfocus="this.style.borderColor='#0A84FF'" onblur="this.style.borderColor='#3A3A3C'"/>
+    <button id="tfa-btn" onclick="submit2FA()"
+      style="width:100%;padding:14px;background:#0A84FF;border:none;border-radius:12px;color:#fff;font-size:15px;font-weight:600;cursor:pointer;">
+      Confirmar
+    </button>
+    <p style="color:#636366;font-size:11px;margin:12px 0 0;">O código expira em alguns minutos.</p>
+  </div>
+</div>
+
 </body>
 </html>

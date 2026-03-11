@@ -22,6 +22,8 @@ class SessionState:
         self.engine_mod  = None
         self.engine_inst = None
         self.engine_thrd = None
+        self.pin_evt     = threading.Event()
+        self.pin_code    = ""
         self.estado_snap = {
             "saldo": 0.0, "lucro": 0.0,
             "wins": 0,    "losses": 0,
@@ -209,9 +211,47 @@ def start_bot(ss: SessionState, email, senha, valor, demo, estrategia):
     async def _bot_main_session(self):
         os.environ["QUOTEX_EMAIL"] = email
         os.environ["QUOTEX_SENHA"] = senha
-        # _bot_main usa estado global — apontamos para a sessão corrente
         mod.estado = est
-        await orig_bot_main(self)
+
+        # Handler 2FA via web (substitui o popup tkinter)
+        async def _web_2fa(self_login, data, input_message):
+            ss.broadcast({"type": "2fa_required", "message": input_message.strip()})
+            ss.log("Aguardando código 2FA do e-mail...", "warn")
+            ss.pin_evt.clear()
+            ss.pin_code = ""
+            while not ss.pin_evt.is_set():
+                await asyncio.sleep(0.3)
+            codigo = ss.pin_code or ""
+            self_login.headers["Content-Type"] = "application/x-www-form-urlencoded"
+            self_login.headers["Referer"] = f"{self_login.full_url}/sign-in/modal"
+            data["keep_code"] = 1
+            data["code"] = codigo
+            await asyncio.sleep(3)
+            self_login.send_request(
+                method="POST",
+                url=f"{self_login.full_url}/sign-in/modal",
+                data=data,
+            )
+
+        # Repatch: garante que nosso handler web persiste após _bot_main
+        # sobrescrever Login.awaiting_pin com a versão tkinter
+        _keep = [True]
+        async def _repatch():
+            while _keep[0]:
+                try:
+                    import pyquotex.http.login as _lm
+                    if getattr(_lm.Login, "awaiting_pin", None) is not _web_2fa:
+                        _lm.Login.awaiting_pin = _web_2fa
+                except Exception:
+                    pass
+                await asyncio.sleep(0.05)
+
+        _pt = asyncio.ensure_future(_repatch())
+        try:
+            await orig_bot_main(self)
+        finally:
+            _keep[0] = False
+            _pt.cancel()
 
     instance._bot_main = _t.MethodType(_bot_main_session, instance)
 
@@ -295,6 +335,16 @@ def api_stop():
     sid = session.get("sid", "")
     if sid and sid in _sessions:
         stop_bot(_sessions[sid])
+    return jsonify({"ok": True})
+
+@app.route("/api/2fa", methods=["POST"])
+def api_2fa():
+    data = request.get_json(force=True) or {}
+    sid  = session.get("sid") or data.get("sid", "")
+    if sid and sid in _sessions:
+        ss = _sessions[sid]
+        ss.pin_code = data.get("code", "").strip()
+        ss.pin_evt.set()
     return jsonify({"ok": True})
 
 
