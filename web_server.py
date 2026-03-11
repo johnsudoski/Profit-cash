@@ -209,7 +209,7 @@ def start_bot(ss: SessionState, email, senha, valor, demo, estrategia):
     orig_bot_main = mod.TelaDashboard._bot_main
 
     async def _bot_main_session(self):
-        import traceback as _tb, pathlib as _pl, configparser as _cp
+        import traceback as _tb, pathlib as _pl, configparser as _cp, glob as _glob
 
         os.environ["QUOTEX_EMAIL"] = email
         os.environ["QUOTEX_SENHA"] = senha
@@ -244,12 +244,25 @@ def start_bot(ss: SessionState, email, senha, valor, demo, estrategia):
 
         _patch_2fa()
 
-        # ── Repatch task ──────────────────────────────────────────────────
-        _keep = [True]
-        async def _repatch():
-            while _keep[0]:
-                _patch_2fa()
-                await asyncio.sleep(0.05)
+        # ── Limpar session.json corrompido/expirado ────────────────────────
+        # Token expirado causa loop de reconexão infinito no pyquotex
+        _deleted = 0
+        for _f in _glob.glob("**/session.json", recursive=True) + _glob.glob("session.json"):
+            try:
+                os.remove(_f)
+                _deleted += 1
+            except Exception:
+                pass
+        try:
+            import pyquotex as _pq
+            _sess = os.path.join(os.path.dirname(_pq.__file__), "resources", "session.json")
+            if os.path.exists(_sess):
+                os.remove(_sess)
+                _deleted += 1
+        except Exception:
+            pass
+        if _deleted:
+            ss.log(f"Cache de sessão removido ({_deleted} arquivo(s))", "info")
 
         # ── Gravar config.ini com credenciais ─────────────────────────────
         try:
@@ -262,50 +275,52 @@ def start_bot(ss: SessionState, email, senha, valor, demo, estrategia):
         except Exception as e:
             ss.log(f"Aviso config.ini: {e}", "warn")
 
-        # ── Teste rápido de conexão (25 s) ────────────────────────────────
-        ss.log("Conectando à Quotex…", "info")
-        try:
-            from pyquotex.stable_api import Quotex as _Q
-            _tc = _Q(email=email, password=senha, lang="pt")
-            _result = await asyncio.wait_for(_tc.connect(), timeout=25)
+        ss.log("Conectando à Quotex… (pode levar até 60s)", "info")
 
-            if isinstance(_result, tuple):
-                _ok, _reason = _result
-            else:
-                _ok, _reason = bool(_result), ("ok" if _result else "falha")
+        # ── Repatch task ──────────────────────────────────────────────────
+        _keep = [True]
+        async def _repatch():
+            while _keep[0]:
+                _patch_2fa()
+                await asyncio.sleep(0.05)
 
-            if not _ok:
-                ss.log(f"❌ Login falhou: {_reason}", "loss")
-                est.rodando = False
-                return
+        # ── Watchdog: cancela bot se não conectar em 90s ──────────────────
+        _bot_task_ref = [None]
 
-            ss.log("✅ Login OK! Iniciando operações…", "win")
-            try:
-                await _tc.close()
-            except Exception:
-                pass
-            await asyncio.sleep(1)
+        async def _watchdog():
+            msgs = {20: "20s…", 40: "40s…", 60: "60s — verificando credenciais…", 80: "80s…"}
+            for t in sorted(msgs):
+                await asyncio.sleep(10 if t == 20 else 20)
+                if not _keep[0] or est.conectado:
+                    return
+                ss.log(f"⏳ Aguardando conexão: {msgs[t]}", "warn")
+            # 90s sem conexão — cancelar
+            if not est.conectado and _bot_task_ref[0]:
+                ss.log("⏰ Não foi possível conectar em 90s. Verifique e-mail/senha e tente novamente.", "loss")
+                _bot_task_ref[0].cancel()
 
-        except asyncio.TimeoutError:
-            ss.log("⏰ Quotex não respondeu em 25 s. Verifique email/senha e tente novamente.", "loss")
-            est.rodando = False
-            return
-        except Exception as e:
-            ss.log(f"❌ {type(e).__name__}: {e}", "loss")
-            print(f"[CONN ERROR] {_tb.format_exc()}", flush=True)
-            est.rodando = False
-            return
-
-        # ── Bot completo ──────────────────────────────────────────────────
+        # ── Executar bot ──────────────────────────────────────────────────
         _pt = asyncio.ensure_future(_repatch())
-        try:
+        _pw = asyncio.ensure_future(_watchdog())
+
+        async def _run():
+            _bot_task_ref[0] = asyncio.current_task()
             await orig_bot_main(self)
+
+        try:
+            await _run()
+        except asyncio.CancelledError:
+            if not est.conectado:
+                pass  # mensagem já exibida pelo watchdog
+            else:
+                ss.log("Bot encerrado.", "warn")
         except Exception as e:
             ss.log(f"❌ Erro no bot: {e}", "loss")
             print(f"[BOT ERROR] {_tb.format_exc()}", flush=True)
         finally:
             _keep[0] = False
             _pt.cancel()
+            _pw.cancel()
 
     instance._bot_main = _t.MethodType(_bot_main_session, instance)
 
