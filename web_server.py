@@ -209,7 +209,8 @@ def start_bot(ss: SessionState, email, senha, valor, demo, estrategia):
     orig_bot_main = mod.TelaDashboard._bot_main
 
     async def _bot_main_session(self):
-        import traceback as _tb, pathlib as _pl, configparser as _cp, glob as _glob
+        import traceback as _tb, pathlib as _pl, configparser as _cp
+        import glob as _glob, logging as _logging
 
         os.environ["QUOTEX_EMAIL"] = email
         os.environ["QUOTEX_SENHA"] = senha
@@ -244,23 +245,16 @@ def start_bot(ss: SessionState, email, senha, valor, demo, estrategia):
 
         _patch_2fa()
 
-        # ── Limpar session.json corrompido/expirado ────────────────────────
-        # Token expirado causa loop de reconexão infinito no pyquotex
+        # ── Limpar session.json (token expirado = loop infinito) ───────────
         _deleted = 0
-        for _f in _glob.glob("**/session.json", recursive=True) + _glob.glob("session.json"):
+        for _f in [os.path.join(os.getcwd(), "session.json")] + \
+                  _glob.glob("**/session.json", recursive=True):
             try:
-                os.remove(_f)
-                _deleted += 1
+                if os.path.exists(_f):
+                    os.remove(_f)
+                    _deleted += 1
             except Exception:
                 pass
-        try:
-            import pyquotex as _pq
-            _sess = os.path.join(os.path.dirname(_pq.__file__), "resources", "session.json")
-            if os.path.exists(_sess):
-                os.remove(_sess)
-                _deleted += 1
-        except Exception:
-            pass
         if _deleted:
             ss.log(f"Cache de sessão removido ({_deleted} arquivo(s))", "info")
 
@@ -275,28 +269,73 @@ def start_bot(ss: SessionState, email, senha, valor, demo, estrategia):
         except Exception as e:
             ss.log(f"Aviso config.ini: {e}", "warn")
 
-        ss.log("Conectando à Quotex… (pode levar até 60s)", "info")
+        # ── Corrigir recursão infinita em Quotex.connect() ────────────────
+        _psa_mod = None
+        _orig_psa_connect = None
+        _connect_depth = [0]
+        try:
+            import pyquotex.stable_api as _psa_mod
+            _orig_psa_connect = _psa_mod.Quotex.connect
 
-        # ── Repatch task ──────────────────────────────────────────────────
+            async def _bounded_connect(self_q):
+                _connect_depth[0] += 1
+                if _connect_depth[0] > 3:
+                    _connect_depth[0] = 0
+                    ss.log("❌ Quotex rejeitou a autenticação após 3 tentativas.", "loss")
+                    ss.log("→ Verifique se e-mail e senha estão corretos.", "warn")
+                    return False, "Auth rejected"
+                try:
+                    result = await _orig_psa_connect(self_q)
+                    _connect_depth[0] = 0
+                    return result
+                except Exception:
+                    _connect_depth[0] = 0
+                    raise
+
+            _psa_mod.Quotex.connect = _bounded_connect
+        except Exception as _pe:
+            ss.log(f"Aviso patch recursão: {_pe}", "warn")
+
+        # ── Logs do pyquotex → frontend ────────────────────────────────────
+        class _FwdLog(_logging.Handler):
+            def emit(self, record):
+                msg = self.format(record)
+                lo = msg.lower()
+                if any(k in lo for k in ["error", "fail", "reject",
+                                          "invalid", "unauthorized"]):
+                    ss.log(f"[debug] {msg}", "loss")
+                elif any(k in lo for k in ["connect", "login", "auth",
+                                            "websocket", "token"]):
+                    ss.log(f"[debug] {msg}", "info")
+
+        _fwd = _FwdLog()
+        _fwd.setFormatter(_logging.Formatter("%(name)s: %(message)s"))
+        for _lg_name in ("pyquotex", "websocket"):
+            _lg = _logging.getLogger(_lg_name)
+            _lg.addHandler(_fwd)
+            _lg.setLevel(_logging.DEBUG)
+
+        ss.log("Conectando à Quotex…", "info")
+
+        # ── Repatch 2FA task ──────────────────────────────────────────────
         _keep = [True]
         async def _repatch():
             while _keep[0]:
                 _patch_2fa()
                 await asyncio.sleep(0.05)
 
-        # ── Watchdog: cancela bot se não conectar em 90s ──────────────────
+        # ── Watchdog: reporta progresso e cancela após 90s ────────────────
         _bot_task_ref = [None]
 
         async def _watchdog():
-            msgs = {20: "20s…", 40: "40s…", 60: "60s — verificando credenciais…", 80: "80s…"}
-            for t in sorted(msgs):
-                await asyncio.sleep(10 if t == 20 else 20)
+            for _s in [20, 40, 60, 80]:
+                await asyncio.sleep(20)
                 if not _keep[0] or est.conectado:
                     return
-                ss.log(f"⏳ Aguardando conexão: {msgs[t]}", "warn")
-            # 90s sem conexão — cancelar
+                ss.log(f"⏳ Aguardando conexão… ({_s}s)", "warn")
+            await asyncio.sleep(10)
             if not est.conectado and _bot_task_ref[0]:
-                ss.log("⏰ Não foi possível conectar em 90s. Verifique e-mail/senha e tente novamente.", "loss")
+                ss.log("⏰ Não conectou em 90s. Verifique e-mail/senha.", "loss")
                 _bot_task_ref[0].cancel()
 
         # ── Executar bot ──────────────────────────────────────────────────
@@ -315,12 +354,16 @@ def start_bot(ss: SessionState, email, senha, valor, demo, estrategia):
             else:
                 ss.log("Bot encerrado.", "warn")
         except Exception as e:
-            ss.log(f"❌ Erro no bot: {e}", "loss")
+            ss.log(f"❌ Erro: {e}", "loss")
             print(f"[BOT ERROR] {_tb.format_exc()}", flush=True)
         finally:
             _keep[0] = False
             _pt.cancel()
             _pw.cancel()
+            if _psa_mod and _orig_psa_connect:
+                _psa_mod.Quotex.connect = _orig_psa_connect
+            for _lg_name in ("pyquotex", "websocket"):
+                _logging.getLogger(_lg_name).removeHandler(_fwd)
 
     instance._bot_main = _t.MethodType(_bot_main_session, instance)
 

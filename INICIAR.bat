@@ -35,7 +35,7 @@ exit /b 1
 
 :found
 echo  Instalando dependencias...
-%PYTHON% -m pip install flask flask-sock pyquotex --quiet --upgrade
+%PYTHON% -m pip install flask flask-sock "git+https://github.com/cleitonleonel/pyquotex.git" --quiet --upgrade
 
 echo  Iniciando... o navegador abrira automaticamente.
 echo  Pressione Ctrl+C para encerrar.
