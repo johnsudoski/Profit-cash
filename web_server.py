@@ -174,7 +174,8 @@ def start_bot(ss: SessionState, email, senha, valor, demo, estrategia):
     est.estrategia = estr
     est.demo       = demo
 
-    instance = object.__new__(mod.App)
+    # _bot_main está em TelaDashboard, não em App
+    instance = object.__new__(mod.TelaDashboard)
     instance._headless = True
     instance.estado    = est
 
@@ -201,11 +202,13 @@ def start_bot(ss: SessionState, email, senha, valor, demo, estrategia):
     est.update = _patched
 
     import types as _t
-    orig_bot_main = mod.App._bot_main
+    orig_bot_main = mod.TelaDashboard._bot_main
 
     async def _bot_main_session(self):
         os.environ["QUOTEX_EMAIL"] = email
         os.environ["QUOTEX_SENHA"] = senha
+        # _bot_main usa estado global — apontamos para a sessão corrente
+        mod.estado = est
         await orig_bot_main(self)
 
     instance._bot_main = _t.MethodType(_bot_main_session, instance)
