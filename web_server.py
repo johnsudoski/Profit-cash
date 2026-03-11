@@ -173,6 +173,8 @@ def start_bot(ss: SessionState, email, senha, valor, demo, estrategia):
     estr["valor"] = max(1.0, float(valor))
     est.estrategia = estr
     est.demo       = demo
+    est.email      = email
+    est.senha      = senha
 
     # _bot_main está em TelaDashboard, não em App
     instance = object.__new__(mod.TelaDashboard)
