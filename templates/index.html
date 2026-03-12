@@ -293,7 +293,7 @@ html,body{
   font-weight:400;
   color:var(--lbl);
   flex-shrink:0;
-  min-width:68px;
+  min-width:60px;
 }
 
 .form-input{
@@ -404,15 +404,6 @@ html,body{
   background:var(--red);
   color:#fff;
   box-shadow:0 4px 24px rgba(255,69,58,.30);
-}
-
-.btn-link{
-  background:rgba(10,132,255,.12);
-  color:var(--blue);
-  font-size:15px;
-  padding:13px;
-  border-radius:var(--r);
-  border:0.5px solid rgba(10,132,255,.25);
 }
 
 /* ─── SPINNER ────────────────────────────────────────────────────────────────*/
@@ -601,11 +592,11 @@ html,body{
         <div class="section-title">Sessão</div>
         <div class="metrics">
           <div class="metric">
-            <div class="metric-val green" id="saldo">R$ 0,00</div>
+            <div class="metric-val green" id="saldo">$ 0,00</div>
             <div class="metric-lbl">Saldo</div>
           </div>
           <div class="metric">
-            <div class="metric-val" id="lucro" style="color:var(--lbl3)">R$ 0,00</div>
+            <div class="metric-val" id="lucro" style="color:var(--lbl3)">$ 0,00</div>
             <div class="metric-lbl">Lucro</div>
           </div>
           <div class="metric">
@@ -623,7 +614,7 @@ html,body{
       <div>
         <div class="section-title">Análise IA</div>
         <div class="signal-card" id="signal-card">
-          <div class="signal-eyebrow">Ensemble · 12 modelos</div>
+          <div class="signal-eyebrow">RSI · SMA · Momentum</div>
           <div class="signal-main" id="sa">AGUARDANDO</div>
           <div class="signal-asset" id="satv"></div>
           <div class="prog-track">
@@ -647,31 +638,17 @@ html,body{
         <!-- Form -->
         <div class="form-card">
           <div class="form-row">
-            <div class="form-icon">✉️</div>
-            <label class="form-label" for="email">Email</label>
-            <input class="form-input" type="email" id="email"
-              placeholder="seu@email.com" autocomplete="email"
-              inputmode="email">
-          </div>
-          <div class="form-row">
-            <div class="form-icon">🔒</div>
-            <label class="form-label" for="senha">Senha</label>
-            <input class="form-input" type="password" id="senha"
-              placeholder="••••••••" autocomplete="current-password">
+            <div class="form-icon">🔑</div>
+            <label class="form-label" for="token">Token</label>
+            <input class="form-input" type="password" id="token"
+              placeholder="Cole seu Token API aqui"
+              autocomplete="off" spellcheck="false">
           </div>
           <div class="form-row">
             <div class="form-icon">💵</div>
-            <label class="form-label" for="valor">Valor</label>
+            <label class="form-label" for="valor">Entrada</label>
             <input class="form-input" type="number" id="valor"
               value="5" min="1" step="1" placeholder="5">
-          </div>
-          <div class="form-row">
-            <div class="form-icon">📊</div>
-            <label class="form-label" for="demo">Conta</label>
-            <select class="form-select" id="demo">
-              <option value="true">Demo 🧪</option>
-              <option value="false">Real 💰</option>
-            </select>
           </div>
         </div>
 
@@ -706,9 +683,12 @@ html,body{
         <!-- Callout info -->
         <div class="callout mt12">
           <span class="callout-icon">ℹ️</span>
-          <span>Não tem conta? <a href="https://quotex.com/sign-up" target="_blank"
-            style="color:var(--blue);text-decoration:none;font-weight:600">Crie gratuitamente na Quotex</a>
-            e use as credenciais acima.</span>
+          <span>
+            Gere seu Token API gratuito em
+            <a href="https://app.deriv.com/account/api-token" target="_blank"
+              style="color:var(--blue);text-decoration:none;font-weight:600">app.deriv.com</a>
+            — marque permissão <strong>Trade</strong> e cole acima.
+          </span>
         </div>
 
       </div>
@@ -761,21 +741,20 @@ function connectWS() {
 }
 
 function handle(m) {
-  if      (m.type === 'estado')       updEstado(m.data);
-  else if (m.type === 'log')          addLog(m.text, m.tag);
-  else if (m.type === 'sinal')        updSinal(m);
-  else if (m.type === 'trade')        addTrade(m);
-  else if (m.type === 'resultado')    updResult(m);
-  else if (m.type === '2fa_required') show2FA(m.message);
+  if      (m.type === 'estado')    updEstado(m.data);
+  else if (m.type === 'log')       addLog(m.text, m.tag);
+  else if (m.type === 'sinal')     updSinal(m);
+  else if (m.type === 'trade')     addTrade(m);
+  else if (m.type === 'resultado') updResult(m);
 }
 
 // ── Estado ────────────────────────────────────────────────────────────────────
 function updEstado(d) {
-  const lucro = d.lucro ?? 0;
-  const wins  = d.wins  ?? 0;
-  const losses= d.losses?? 0;
-  const total = wins + losses;
-  const wr    = total > 0 ? Math.round(wins / total * 100) : null;
+  const lucro  = d.lucro  ?? 0;
+  const wins   = d.wins   ?? 0;
+  const losses = d.losses ?? 0;
+  const total  = wins + losses;
+  const wr     = total > 0 ? Math.round(wins / total * 100) : null;
 
   el('saldo').textContent = fmt(d.saldo ?? 0);
 
@@ -810,9 +789,11 @@ function updSinal(m) {
   card.className = 'signal-card ' +
     (action === 'CALL' ? 'call-active' : action === 'PUT' ? 'put-active' : '');
 
-  el('satv').textContent  = m.ativo || '';
-  el('sc').textContent    = action !== 'HOLD' ? `Confiança: ${Math.round(conf * 100)}%` : 'Analisando mercado…';
-  el('sm').textContent    = m.motivo || '';
+  el('satv').textContent = m.ativo || '';
+  el('sc').textContent   = action !== 'HOLD'
+    ? `Confiança: ${Math.round(conf * 100)}%`
+    : 'Analisando mercado…';
+  el('sm').textContent   = m.motivo || '';
 
   const cb = el('cb');
   cb.style.width = Math.round(conf * 100) + '%';
@@ -853,7 +834,7 @@ function renderHist() {
         <span class="trade-asset">${t.ativo}</span>
       </div>
       <div style="text-align:right">
-        ${t.valor ? `<div class="trade-amount">R$ ${t.valor.toFixed(2)}</div>` : ''}
+        ${t.valor ? `<div class="trade-amount">$ ${t.valor.toFixed(2)}</div>` : ''}
         <div class="trade-result ${t.resultado === 'W' ? 'win' : t.resultado === 'L' ? 'loss' : 'pending'}">
           ${t.resultado === 'W' ? '✓ WIN' : t.resultado === 'L' ? '✗ LOSS' : '● '}
         </div>
@@ -863,13 +844,10 @@ function renderHist() {
 
 // ── Ações ─────────────────────────────────────────────────────────────────────
 async function startBot() {
-  const email = el('email').value.trim();
-  const senha = el('senha').value.trim();
+  const token = el('token').value.trim();
   const valor = parseFloat(el('valor').value) || 5;
-  const demo  = el('demo').value === 'true';
 
-  if (!email) { toast('Informe seu email da Quotex'); el('email').focus(); return; }
-  if (!senha) { toast('Informe sua senha da Quotex'); el('senha').focus(); return; }
+  if (!token) { toast('Cole seu Token API da Deriv'); el('token').focus(); return; }
 
   el('bstart').disabled = true;
   el('bstart').innerHTML = '<span class="spin"></span>&nbsp; Conectando…';
@@ -878,12 +856,11 @@ async function startBot() {
     const r = await fetch(`${API}/api/start`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ email, senha, valor, demo, estrategia, sid: SID })
+      body: JSON.stringify({ token, valor, estrategia, sid: SID })
     });
     const d = await r.json();
     if (!d.ok) throw new Error(d.error || 'Erro ao iniciar');
     toast('Robô iniciado ✓');
-    addLog('Conectando à Quotex…', 'info');
   } catch (e) {
     toast('Erro: ' + e.message);
     el('bstart').disabled = false;
@@ -913,11 +890,12 @@ function setConn(state) {
   const dot  = el('dot');
   const stxt = el('stxt');
   dot.className = 'status-dot ' + state;
-  stxt.textContent = state === 'on' ? 'Conectado' : state === 'connecting' ? 'Conectando…' : 'Desconectado';
+  stxt.textContent = state === 'on' ? 'Conectado'
+                   : state === 'connecting' ? 'Conectando…' : 'Desconectado';
 }
 
 function fmt(v, signed = false) {
-  const abs = 'R$ ' + Math.abs(v).toLocaleString('pt-BR', {
+  const abs = '$ ' + Math.abs(v).toLocaleString('pt-BR', {
     minimumFractionDigits: 2, maximumFractionDigits: 2
   });
   if (!signed) return abs;
@@ -940,52 +918,9 @@ function switchTab(name, btn) {
   el('tp-' + name).classList.add('active');
 }
 
-// ── 2FA ──────────────────────────────────────────────────────────────────────
-function show2FA(msg) {
-  el('tfa-msg').textContent = msg || 'Verifique seu e-mail e insira o código enviado pela Quotex.';
-  el('tfa-input').value = '';
-  el('tfa-overlay').style.display = 'flex';
-  setTimeout(() => el('tfa-input').focus(), 100);
-}
-
-async function submit2FA() {
-  const code = el('tfa-input').value.trim();
-  if (!code) return;
-  el('tfa-btn').disabled = true;
-  el('tfa-btn').textContent = 'Enviando…';
-  await fetch(`${API}/api/2fa`, {
-    method: 'POST',
-    headers: {'Content-Type':'application/json'},
-    body: JSON.stringify({ code, sid: SID })
-  });
-  el('tfa-overlay').style.display = 'none';
-  el('tfa-btn').disabled = false;
-  el('tfa-btn').textContent = 'Confirmar';
-  addLog('Código 2FA enviado.', 'info');
-}
-
-el('tfa-input').addEventListener('keydown', e => { if (e.key === 'Enter') submit2FA(); });
-
 // Conectar WS ao carregar
 connectWS();
 </script>
-
-<!-- ── Modal 2FA ─────────────────────────────────────────────────────────── -->
-<div id="tfa-overlay" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.75);z-index:999;align-items:center;justify-content:center;backdrop-filter:blur(6px);">
-  <div style="background:#1C1C1E;border-radius:20px;padding:32px 28px;width:min(360px,90vw);text-align:center;box-shadow:0 24px 64px rgba(0,0,0,.6);">
-    <div style="font-size:36px;margin-bottom:12px;">🔐</div>
-    <h2 style="color:#fff;font-size:18px;font-weight:700;margin:0 0 8px;">Verificação de Segurança</h2>
-    <p id="tfa-msg" style="color:#8E8E93;font-size:13px;margin:0 0 24px;line-height:1.5;">Verifique seu e-mail e insira o código da Quotex.</p>
-    <input id="tfa-input" type="text" inputmode="numeric" maxlength="8" placeholder="000000"
-      style="width:100%;box-sizing:border-box;background:#2C2C2E;border:1.5px solid #3A3A3C;border-radius:12px;color:#fff;font-size:28px;font-weight:700;text-align:center;padding:14px;letter-spacing:8px;outline:none;margin-bottom:16px;"
-      onfocus="this.style.borderColor='#0A84FF'" onblur="this.style.borderColor='#3A3A3C'"/>
-    <button id="tfa-btn" onclick="submit2FA()"
-      style="width:100%;padding:14px;background:#0A84FF;border:none;border-radius:12px;color:#fff;font-size:15px;font-weight:600;cursor:pointer;">
-      Confirmar
-    </button>
-    <p style="color:#636366;font-size:11px;margin:12px 0 0;">O código expira em alguns minutos.</p>
-  </div>
-</div>
 
 </body>
 </html>

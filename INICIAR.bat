@@ -2,8 +2,8 @@
 title Profit Cash
 
 echo.
-echo  Profit Cash - Trading IA
-echo  ========================
+echo  Profit Cash - Trading IA (Deriv)
+echo  ==================================
 echo.
 
 cd /d "%~dp0"
@@ -35,7 +35,7 @@ exit /b 1
 
 :found
 echo  Instalando dependencias...
-%PYTHON% -m pip install flask flask-sock "git+https://github.com/cleitonleonel/pyquotex.git" --quiet --upgrade
+%PYTHON% -m pip install flask flask-sock websockets --quiet --upgrade
 
 echo  Iniciando... o navegador abrira automaticamente.
 echo  Pressione Ctrl+C para encerrar.

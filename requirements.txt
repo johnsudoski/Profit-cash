@@ -1,7 +1,3 @@
 flask
 flask-sock
-requests
-websocket-client
-beautifulsoup4
-certifi
-numpy
+websockets
