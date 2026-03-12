@@ -1,0 +1,205 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no,viewport-fit=cover">
+<meta name="theme-color" content="#000000">
+<title>Profit Cash — Entrar</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0;-webkit-tap-highlight-color:transparent}
+:root{
+  --bg:#000;--bg2:#1C1C1E;--bg3:#2C2C2E;--bg4:#3A3A3C;
+  --sep:rgba(84,84,88,.65);--fill3:rgba(118,118,128,.24);
+  --lbl:#FFF;--lbl2:rgba(235,235,245,.6);--lbl3:rgba(235,235,245,.3);
+  --blue:#0A84FF;--green:#30D158;--red:#FF453A;
+  --r:12px;--r-lg:20px;--r-full:100px;
+}
+html,body{
+  height:100%;min-height:100dvh;
+  font-family:-apple-system,BlinkMacSystemFont,'SF Pro Text',system-ui,sans-serif;
+  background:var(--bg);color:var(--lbl);
+  -webkit-font-smoothing:antialiased;
+  display:flex;align-items:center;justify-content:center;
+  padding:24px 16px;
+}
+.card{
+  width:100%;max-width:380px;
+  background:var(--bg2);
+  border-radius:var(--r-lg);
+  overflow:hidden;
+  box-shadow:0 8px 48px rgba(0,0,0,.65);
+}
+.logo{
+  text-align:center;
+  padding:32px 24px 24px;
+  border-bottom:0.5px solid var(--sep);
+}
+.logo-icon{
+  font-size:44px;
+  display:block;
+  margin-bottom:10px;
+}
+.logo-title{
+  font-size:24px;font-weight:700;letter-spacing:-0.5px;
+}
+.logo-title span{color:var(--green)}
+.logo-sub{
+  font-size:13px;color:var(--lbl3);margin-top:4px;
+}
+
+/* Tabs */
+.tabs{
+  display:flex;
+  background:var(--fill3);
+  margin:16px 16px 0;
+  border-radius:10px;
+  padding:2px;
+}
+.tab{
+  flex:1;padding:8px;text-align:center;
+  border-radius:9px;font-size:13px;font-weight:600;
+  color:var(--lbl2);cursor:pointer;transition:all .18s;
+  user-select:none;
+}
+.tab.active{
+  background:var(--bg3);color:var(--lbl);
+  box-shadow:0 1px 4px rgba(0,0,0,.35);
+}
+.panel{display:none;padding:16px}
+.panel.active{display:block}
+
+/* Form fields */
+.field{
+  background:var(--bg3);
+  border-radius:var(--r);
+  overflow:hidden;
+  margin-bottom:10px;
+}
+.field-row{
+  display:flex;align-items:center;
+  padding:13px 14px;
+  border-bottom:0.5px solid var(--sep);
+  gap:10px;
+}
+.field-row:last-child{border-bottom:none}
+.field-icon{font-size:16px;flex-shrink:0;opacity:.7}
+.field-input{
+  flex:1;background:transparent;border:none;outline:none;
+  font-size:15px;font-family:inherit;color:var(--lbl);
+  -webkit-appearance:none;
+}
+.field-input::placeholder{color:var(--lbl3)}
+
+/* Button */
+.btn{
+  display:flex;align-items:center;justify-content:center;
+  width:100%;padding:15px;border:none;border-radius:var(--r);
+  font-size:16px;font-weight:600;font-family:inherit;
+  cursor:pointer;transition:opacity .15s,transform .15s;
+  user-select:none;margin-top:4px;
+}
+.btn:active{transform:scale(.97);opacity:.85}
+.btn-green{background:var(--green);color:#fff;box-shadow:0 4px 20px rgba(48,209,88,.28)}
+.btn-blue {background:var(--blue); color:#fff;box-shadow:0 4px 20px rgba(10,132,255,.28)}
+
+/* Error */
+.error-box{
+  background:rgba(255,69,58,.12);
+  border:0.5px solid rgba(255,69,58,.3);
+  border-radius:var(--r);
+  padding:11px 14px;
+  font-size:13px;color:var(--red);
+  margin-bottom:12px;
+  line-height:1.4;
+}
+
+.footer{
+  padding:16px;border-top:0.5px solid var(--sep);
+  text-align:center;font-size:12px;color:var(--lbl3);
+}
+</style>
+</head>
+<body>
+<div class="card">
+
+  <!-- LOGO -->
+  <div class="logo">
+    <span class="logo-icon">📈</span>
+    <div class="logo-title">Profit <span>Cash</span></div>
+    <div class="logo-sub">Trading automatizado com IA</div>
+  </div>
+
+  <!-- TABS -->
+  <div class="tabs">
+    <div class="tab {% if tab=='login' %}active{% endif %}" id="t-login" onclick="switchTab('login')">
+      Entrar
+    </div>
+    <div class="tab {% if tab=='register' %}active{% endif %}" id="t-register" onclick="switchTab('register')">
+      Criar conta
+    </div>
+  </div>
+
+  <!-- PANEL LOGIN -->
+  <div class="panel {% if tab=='login' or not tab %}active{% endif %}" id="p-login">
+    {% if error and tab != 'register' %}
+    <div class="error-box">{{ error }}</div>
+    {% endif %}
+    <form method="POST">
+      <input type="hidden" name="action" value="login">
+      <div class="field">
+        <div class="field-row">
+          <span class="field-icon">✉️</span>
+          <input class="field-input" type="email" name="email" placeholder="seu@email.com"
+            autocomplete="email" required>
+        </div>
+        <div class="field-row">
+          <span class="field-icon">🔒</span>
+          <input class="field-input" type="password" name="password" placeholder="Senha"
+            autocomplete="current-password" required>
+        </div>
+      </div>
+      <button type="submit" class="btn btn-green">Entrar</button>
+    </form>
+  </div>
+
+  <!-- PANEL REGISTER -->
+  <div class="panel {% if tab=='register' %}active{% endif %}" id="p-register">
+    {% if error and tab == 'register' %}
+    <div class="error-box">{{ error }}</div>
+    {% endif %}
+    <form method="POST">
+      <input type="hidden" name="action" value="register">
+      <div class="field">
+        <div class="field-row">
+          <span class="field-icon">👤</span>
+          <input class="field-input" type="text" name="username" placeholder="Seu nome"
+            autocomplete="name" required>
+        </div>
+        <div class="field-row">
+          <span class="field-icon">✉️</span>
+          <input class="field-input" type="email" name="email" placeholder="seu@email.com"
+            autocomplete="email" required>
+        </div>
+        <div class="field-row">
+          <span class="field-icon">🔒</span>
+          <input class="field-input" type="password" name="password" placeholder="Senha (mín. 6 caracteres)"
+            autocomplete="new-password" required minlength="6">
+        </div>
+      </div>
+      <button type="submit" class="btn btn-blue">Criar conta</button>
+    </form>
+  </div>
+
+  <div class="footer">Profit Cash · Powered by Deriv API</div>
+</div>
+
+<script>
+function switchTab(name) {
+  ['login','register'].forEach(t => {
+    document.getElementById('t-'+t).classList.toggle('active', t===name);
+    document.getElementById('p-'+t).classList.toggle('active', t===name);
+  });
+}
+</script>
+</body>
+</html>

@@ -571,9 +571,15 @@ html,body{
 <nav class="nav">
   <div class="nav-inner">
     <div class="nav-title">Profit <span>Cash</span></div>
-    <div class="status-pill">
-      <span class="status-dot" id="dot"></span>
-      <span id="stxt">Desconectado</span>
+    <div style="display:flex;align-items:center;gap:8px">
+      <div class="status-pill">
+        <span class="status-dot" id="dot"></span>
+        <span id="stxt">Desconectado</span>
+      </div>
+      {% if is_admin %}
+      <a href="/admin" style="font-size:12px;font-weight:600;color:var(--blue);text-decoration:none;padding:5px 10px;background:rgba(10,132,255,.12);border-radius:var(--r-full);border:0.5px solid rgba(10,132,255,.25)">⚙ Admin</a>
+      {% endif %}
+      <a href="/logout" style="font-size:12px;font-weight:500;color:var(--lbl3);text-decoration:none;padding:5px 10px;background:var(--fill4);border-radius:var(--r-full);border:0.5px solid var(--sep)">Sair</a>
     </div>
   </div>
 </nav>
