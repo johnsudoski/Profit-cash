@@ -219,7 +219,7 @@ def calc_signal(prices: list, config: dict):
 # ════════════════════════════════════════════════════════
 #  BOT DERIV
 # ════════════════════════════════════════════════════════
-async def _deriv_bot_async(ss: SessionState, token: str, stake: float, estrategia: str):
+async def _deriv_bot_async(ss: SessionState, token: str, stake: float, estrategia: str, want_demo: bool = False):
     try:
         import websockets
     except ImportError:
@@ -256,10 +256,34 @@ async def _deriv_bot_async(ss: SessionState, token: str, stake: float, estrategi
                 return
 
             acct     = auth.get("authorize", {})
+            is_virt  = bool(acct.get("is_virtual", False))
+
+            # Tentar trocar de conta se o tipo não bate com o desejado
+            if want_demo != is_virt:
+                acct_list = acct.get("account_list", [])
+                targets = [a for a in acct_list
+                           if bool(a.get("is_virtual", False)) == want_demo
+                           and a.get("token")]
+                if targets:
+                    new_token = targets[0]["token"]
+                    tipo_str  = "Demo 🧪" if want_demo else "Real 💰"
+                    ss.log(f"🔄 Alternando para conta {tipo_str}…", "info")
+                    await dws.send(json.dumps({"authorize": new_token}))
+                    raw2  = await asyncio.wait_for(dws.recv(), timeout=20)
+                    auth2 = json.loads(raw2)
+                    if "error" not in auth2:
+                        acct    = auth2.get("authorize", {})
+                        is_virt = bool(acct.get("is_virtual", False))
+                    else:
+                        ss.log("⚠️ Falha ao trocar conta, continuando com a atual.", "warn")
+                else:
+                    tipo_str = "Demo 🧪" if want_demo else "Real 💰"
+                    ss.log(f"⚠️ Conta {tipo_str} não encontrada neste token.", "warn")
+
             loginid  = acct.get("loginid", "?")
             saldo0   = float(acct.get("balance", 0))
             currency = acct.get("currency", "USD")
-            is_virt  = acct.get("is_virtual", False)
+            is_virt  = bool(acct.get("is_virtual", False))
             tipo     = "Demo 🧪" if is_virt else "Real 💰"
 
             ss.log(f"✅ Conta {loginid} ({tipo}) autenticada!", "win")
@@ -382,7 +406,7 @@ async def _deriv_bot_async(ss: SessionState, token: str, stake: float, estrategi
         ss.log("Robô desconectado.", "warn")
 
 
-def start_bot(ss: SessionState, token: str, stake: float, estrategia: str):
+def start_bot(ss: SessionState, token: str, stake: float, estrategia: str, want_demo: bool = False):
     if ss.estado_snap.get("rodando"):
         return
     ss.stop_evt.clear()
@@ -391,7 +415,7 @@ def start_bot(ss: SessionState, token: str, stake: float, estrategia: str):
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
         try:
-            loop.run_until_complete(_deriv_bot_async(ss, token, stake, estrategia))
+            loop.run_until_complete(_deriv_bot_async(ss, token, stake, estrategia, want_demo))
         except Exception as e:
             ss.log(f"Robô encerrado: {e}", "warn")
         finally:
@@ -571,6 +595,7 @@ def api_start():
     token      = data.get("token", "").strip()
     stake      = max(1.0, float(data.get("valor", 5.0)))
     estrategia = data.get("estrategia", "moderada")
+    want_demo  = bool(data.get("demo", True))
 
     if not token:
         return jsonify({"ok": False, "error": "Token API obrigatório"}), 400
@@ -578,7 +603,7 @@ def api_start():
         return jsonify({"ok": False, "error": "Robô já está rodando"}), 400
 
     try:
-        start_bot(ss, token, stake, estrategia)
+        start_bot(ss, token, stake, estrategia, want_demo)
         return jsonify({"ok": True, "sid": sid})
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)}), 500
@@ -623,3 +648,8 @@ init_db()
 def run_server(host="0.0.0.0", port=5000):
     app.run(host=host, port=port, debug=False,
             use_reloader=False, threaded=True)
+
+
+if __name__ == "__main__":
+    port = int(os.environ.get("PORT", 5000))
+    run_server(host="0.0.0.0", port=port)

@@ -326,6 +326,34 @@ html,body{
 }
 .form-select option{background:var(--bg3);color:var(--lbl)}
 
+.acct-seg{
+  display:flex;
+  background:var(--fill3);
+  border-radius:8px;
+  padding:2px;
+  margin-left:auto;
+}
+.acct-opt{
+  flex:1;
+  padding:6px 10px;
+  text-align:center;
+  border-radius:6px;
+  font-size:13px;
+  font-weight:600;
+  color:var(--lbl2);
+  cursor:pointer;
+  transition:all .15s;
+  user-select:none;
+  white-space:nowrap;
+}
+.acct-opt.active{
+  background:var(--bg3);
+  color:var(--lbl);
+  box-shadow:0 1px 3px rgba(0,0,0,.3);
+}
+.acct-opt[data-v="demo"].active{color:var(--blue)}
+.acct-opt[data-v="real"].active{color:var(--green)}
+
 .form-icon{
   font-size:18px;
   width:32px;
@@ -644,6 +672,14 @@ html,body{
         <!-- Form -->
         <div class="form-card">
           <div class="form-row">
+            <div class="form-icon">🏦</div>
+            <label class="form-label">Conta</label>
+            <div class="acct-seg" id="acctSeg">
+              <div class="acct-opt active" data-v="demo" onclick="selAcct(this)">🧪 Demo</div>
+              <div class="acct-opt" data-v="real" onclick="selAcct(this)">💰 Real</div>
+            </div>
+          </div>
+          <div class="form-row">
             <div class="form-icon">🔑</div>
             <label class="form-label" for="token">Token</label>
             <input class="form-input" type="password" id="token"
@@ -735,7 +771,7 @@ if (!SID) { SID = crypto.randomUUID(); localStorage.setItem('pcSid', SID); }
 const API    = `${location.protocol}//${location.host}`;
 const WS_URL = `${location.protocol==='https:'?'wss':'ws'}://${location.host}/ws/${SID}`;
 
-let ws, estrategia = 'cautelosa', tradeHist = [], reconnT;
+let ws, estrategia = 'cautelosa', isDemo = true, tradeHist = [], reconnT;
 
 // ── WebSocket ─────────────────────────────────────────────────────────────────
 function connectWS() {
@@ -862,7 +898,7 @@ async function startBot() {
     const r = await fetch(`${API}/api/start`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ token, valor, estrategia, sid: SID })
+      body: JSON.stringify({ token, valor, estrategia, sid: SID, demo: isDemo })
     });
     const d = await r.json();
     if (!d.ok) throw new Error(d.error || 'Erro ao iniciar');
@@ -890,6 +926,12 @@ function selStrat(btn) {
   document.querySelectorAll('.strat-btn').forEach(b => b.classList.remove('active'));
   btn.classList.add('active');
   estrategia = btn.dataset.e;
+}
+
+function selAcct(btn) {
+  document.querySelectorAll('.acct-opt').forEach(b => b.classList.remove('active'));
+  btn.classList.add('active');
+  isDemo = btn.dataset.v === 'demo';
 }
 
 function setConn(state) {

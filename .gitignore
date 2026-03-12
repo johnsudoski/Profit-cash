@@ -5,3 +5,6 @@ __pycache__/
 *.log
 .DS_Store
 Thumbs.db
+users.db
+*.db
+settings/
