@@ -250,6 +250,7 @@ async def _deriv_bot_async(ss: SessionState, token: str, valor_brl: float,
     trade_count = 0
     currency    = "USD"
     last_status = [time.time()]
+    poc_subscribed = [False]  # subscrição global de contratos (enviada uma vez)
 
     ss.log("Conectando à Deriv…", "info")
     ss.update_estado(rodando=True)
@@ -319,41 +320,15 @@ async def _deriv_bot_async(ss: SessionState, token: str, valor_brl: float,
                 _attempt = 0  # reset contador ao conectar com sucesso
 
                 # ── CONVERSÃO BRL → MOEDA DA CONTA ────────────────────────
+                # Tabela de referência (atualizada manualmente quando necessário)
+                _BRL_PER = {"USD": 5.70, "EUR": 6.20, "GBP": 7.20,
+                            "AUD": 3.70, "CAD": 4.10, "CHF": 6.40}
                 if currency == "BRL":
                     stake = valor_brl
                 else:
-                    # Pede taxa com base em USD (Deriv não aceita BRL como base)
-                    req_ctr[0] += 1
-                    await dws.send(json.dumps({
-                        "exchange_rates": 1,
-                        "base_currency": currency,  # ex: "USD"
-                        "req_id": req_ctr[0],
-                    }))
-                    rate_brl = 0.0
-                    try:
-                        # Procura a mensagem exchange_rates (ignora outras que possam vir)
-                        for _ in range(5):
-                            raw_er = await asyncio.wait_for(dws.recv(), timeout=10)
-                            er_msg = json.loads(raw_er)
-                            if er_msg.get("msg_type") == "exchange_rates":
-                                rates    = (er_msg.get("exchange_rates") or {}).get("rates", {})
-                                rate_brl = float(rates.get("BRL", 0))
-                                break
-                    except Exception:
-                        pass
-
-                    if rate_brl > 0:
-                        # rate_brl = quantos BRL vale 1 unidade de currency
-                        # ex: 1 USD = 5.70 BRL → stake = 10 / 5.70 = 1.75 USD
-                        stake = max(round(valor_brl / rate_brl, 2), 0.35)
-                        ss.log(f"💱 R${valor_brl:.2f} → {currency} {stake:.2f} "
-                               f"(câmbio: 1 {currency} = R${rate_brl:.2f})", "info")
-                    else:
-                        # Fallback silencioso com taxa aproximada
-                        _fallback = {"USD": 5.70, "EUR": 6.20, "GBP": 7.20}
-                        rate_brl  = _fallback.get(currency, 5.70)
-                        stake     = max(round(valor_brl / rate_brl, 2), 0.35)
-                        ss.log(f"💱 R${valor_brl:.2f} → {currency} {stake:.2f}", "info")
+                    rate_brl = _BRL_PER.get(currency, 5.70)
+                    stake    = max(round(valor_brl / rate_brl, 2), 0.35)
+                ss.log(f"💱 R${valor_brl:.2f} → {currency} {stake:.2f}", "info")
 
                 # ── SUBSCRIÇÕES ───────────────────────────────────────────
                 await dws.send(json.dumps({"balance": 1, "subscribe": 1}))
@@ -509,15 +484,16 @@ async def _deriv_bot_async(ss: SessionState, token: str, valor_brl: float,
                         if cid:
                             tid = f"T{trade_count}"
                             active_cx[cid] = {"tid": tid, "buy_price": bp}
-                            ss.log(f"✅ Contrato #{cid} aberto — ${bp:.2f}", "win")
-                            # Subscrição individual por contrato (evita "Unrecognised request")
-                            req_ctr[0] += 1
-                            await dws.send(json.dumps({
-                                "proposal_open_contracts": 1,
-                                "contract_id": int(cid),
-                                "subscribe": 1,
-                                "req_id": req_ctr[0],
-                            }))
+                            ss.log(f"✅ Contrato #{cid} aberto — R${valor_brl:.2f}", "win")
+                            # Subscrição global enviada UMA vez (contract_id não é parâmetro válido)
+                            if not poc_subscribed[0]:
+                                req_ctr[0] += 1
+                                await dws.send(json.dumps({
+                                    "proposal_open_contracts": 1,
+                                    "subscribe": 1,
+                                    "req_id": req_ctr[0],
+                                }))
+                                poc_subscribed[0] = True
                         continue
 
                     # ── RESULTADO DO CONTRATO ──────────────────────────────
