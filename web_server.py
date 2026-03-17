@@ -322,28 +322,38 @@ async def _deriv_bot_async(ss: SessionState, token: str, valor_brl: float,
                 if currency == "BRL":
                     stake = valor_brl
                 else:
+                    # Pede taxa com base em USD (Deriv não aceita BRL como base)
                     req_ctr[0] += 1
                     await dws.send(json.dumps({
                         "exchange_rates": 1,
-                        "base_currency": "BRL",
+                        "base_currency": currency,  # ex: "USD"
                         "req_id": req_ctr[0],
                     }))
+                    rate_brl = 0.0
                     try:
-                        raw_er = await asyncio.wait_for(dws.recv(), timeout=10)
-                        er_msg = json.loads(raw_er)
-                        rates  = (er_msg.get("exchange_rates") or {}).get("rates", {})
-                        rate   = float(rates.get(currency, 0))
-                        if rate > 0:
-                            stake = max(round(valor_brl * rate, 2), 0.35)
-                            ss.log(f"💱 R${valor_brl:.2f} → {currency} {stake:.2f} "
-                                   f"(1 BRL = {rate:.4f} {currency})", "info")
-                        else:
-                            raise ValueError("taxa não encontrada")
+                        # Procura a mensagem exchange_rates (ignora outras que possam vir)
+                        for _ in range(5):
+                            raw_er = await asyncio.wait_for(dws.recv(), timeout=10)
+                            er_msg = json.loads(raw_er)
+                            if er_msg.get("msg_type") == "exchange_rates":
+                                rates    = (er_msg.get("exchange_rates") or {}).get("rates", {})
+                                rate_brl = float(rates.get("BRL", 0))
+                                break
                     except Exception:
-                        # Fallback: ~R$5,70 por USD
-                        stake = max(round(valor_brl / 5.7, 2), 0.35)
-                        ss.log(f"⚠️ Taxa BRL/{currency} indisponível — estimativa: "
-                               f"{currency} {stake:.2f}", "warn")
+                        pass
+
+                    if rate_brl > 0:
+                        # rate_brl = quantos BRL vale 1 unidade de currency
+                        # ex: 1 USD = 5.70 BRL → stake = 10 / 5.70 = 1.75 USD
+                        stake = max(round(valor_brl / rate_brl, 2), 0.35)
+                        ss.log(f"💱 R${valor_brl:.2f} → {currency} {stake:.2f} "
+                               f"(câmbio: 1 {currency} = R${rate_brl:.2f})", "info")
+                    else:
+                        # Fallback silencioso com taxa aproximada
+                        _fallback = {"USD": 5.70, "EUR": 6.20, "GBP": 7.20}
+                        rate_brl  = _fallback.get(currency, 5.70)
+                        stake     = max(round(valor_brl / rate_brl, 2), 0.35)
+                        ss.log(f"💱 R${valor_brl:.2f} → {currency} {stake:.2f}", "info")
 
                 # ── SUBSCRIÇÕES ───────────────────────────────────────────
                 await dws.send(json.dumps({"balance": 1, "subscribe": 1}))
