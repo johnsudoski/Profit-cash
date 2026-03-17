@@ -52,12 +52,18 @@ def init_db():
                 password_hash TEXT NOT NULL,
                 is_active     INTEGER DEFAULT 1,
                 is_admin      INTEGER DEFAULT 0,
+                deriv_token   TEXT DEFAULT '',
                 created_at    TEXT DEFAULT CURRENT_TIMESTAMP
             )
         """)
+        # Migração para bancos antigos sem deriv_token
+        try:
+            conn.execute("ALTER TABLE users ADD COLUMN deriv_token TEXT DEFAULT ''")
+        except sqlite3.OperationalError:
+            pass  # Coluna já existe
         conn.commit()
 
-    # Criar admin a partir de variáveis de ambiente (opcional)
+    # Criar admin a partir de variáveis de ambiente
     admin_user = os.environ.get("ADMIN_USERNAME", "")
     admin_pass = os.environ.get("ADMIN_PASSWORD", "")
     if admin_user and admin_pass:
@@ -217,9 +223,13 @@ def calc_signal(prices: list, config: dict):
 
 
 # ════════════════════════════════════════════════════════
-#  BOT DERIV
+#  BOT DERIV — CORRIGIDO
+#  Fix 1: req_id DEVE ser inteiro (Deriv rejeita strings)
+#  Fix 2: buy usa ask_price da proposta (não o stake)
+#  Fix 3: logging detalhado para diagnóstico
 # ════════════════════════════════════════════════════════
-async def _deriv_bot_async(ss: SessionState, token: str, stake: float, estrategia: str, want_demo: bool = False):
+async def _deriv_bot_async(ss: SessionState, token: str, stake: float,
+                            estrategia: str, want_demo: bool = False):
     try:
         import websockets
     except ImportError:
@@ -229,12 +239,14 @@ async def _deriv_bot_async(ss: SessionState, token: str, stake: float, estrategi
     config      = STRATEGIES.get(estrategia, STRATEGIES["moderada"])
     lucro_total = 0.0
     wins = losses = 0
-    tick_buf   = {a: [] for a in ASSETS}
-    last_trade = {a: 0.0 for a in ASSETS}
-    active_cx  = {}
-    pending_p  = {}
+    tick_buf    = {a: [] for a in ASSETS}
+    last_trade  = {a: 0.0 for a in ASSETS}
+    active_cx   = {}   # contract_id -> {tid, buy_price}
+    pending_p   = {}   # req_id (int) -> {asset, direction, conf, motivo}
+    req_ctr     = [0]  # inteiro mutable via lista (closure)
     trade_count = 0
     currency    = "USD"
+    last_status = [time.time()]
 
     ss.log("Conectando à Deriv…", "info")
     ss.update_estado(rodando=True)
@@ -243,8 +255,9 @@ async def _deriv_bot_async(ss: SessionState, token: str, stake: float, estrategi
         async with websockets.connect(
             DERIV_WS, ping_interval=20, ping_timeout=30, open_timeout=20
         ) as dws:
-            ss.log("WebSocket estabelecido.", "info")
+            ss.log("✅ WebSocket estabelecido.", "info")
 
+            # ── AUTORIZAÇÃO ───────────────────────────────────────────
             await dws.send(json.dumps({"authorize": token}))
             raw  = await asyncio.wait_for(dws.recv(), timeout=20)
             auth = json.loads(raw)
@@ -252,13 +265,14 @@ async def _deriv_bot_async(ss: SessionState, token: str, stake: float, estrategi
             if "error" in auth:
                 err = auth["error"].get("message", "Token inválido")
                 ss.log(f"❌ Autenticação falhou: {err}", "loss")
-                ss.log("→ Gere um token em app.deriv.com → Conta → Token API", "warn")
+                ss.log("→ Verifique o token em app.deriv.com → Conta → Token API", "warn")
+                ss.log("→ Precisa ter permissão 'Trade' ativada", "warn")
                 return
 
-            acct     = auth.get("authorize", {})
-            is_virt  = bool(acct.get("is_virtual", False))
+            acct    = auth.get("authorize", {})
+            is_virt = bool(acct.get("is_virtual", False))
 
-            # Tentar trocar de conta se o tipo não bate com o desejado
+            # ── TROCA DE CONTA (Demo ↔ Real) ──────────────────────────
             if want_demo != is_virt:
                 acct_list = acct.get("account_list", [])
                 targets = [a for a in acct_list
@@ -278,7 +292,7 @@ async def _deriv_bot_async(ss: SessionState, token: str, stake: float, estrategi
                         ss.log("⚠️ Falha ao trocar conta, continuando com a atual.", "warn")
                 else:
                     tipo_str = "Demo 🧪" if want_demo else "Real 💰"
-                    ss.log(f"⚠️ Conta {tipo_str} não encontrada neste token.", "warn")
+                    ss.log(f"⚠️ Conta {tipo_str} não encontrada. Usando a atual.", "warn")
 
             loginid  = acct.get("loginid", "?")
             saldo0   = float(acct.get("balance", 0))
@@ -287,58 +301,98 @@ async def _deriv_bot_async(ss: SessionState, token: str, stake: float, estrategi
             tipo     = "Demo 🧪" if is_virt else "Real 💰"
 
             ss.log(f"✅ Conta {loginid} ({tipo}) autenticada!", "win")
-            ss.log(f"💰 Saldo: {saldo0:.2f} {currency}", "info")
+            ss.log(f"💰 Saldo inicial: {saldo0:.2f} {currency}", "info")
             ss.update_estado(saldo=saldo0, conectado=True)
 
+            # ── SUBSCRIÇÕES ───────────────────────────────────────────
             await dws.send(json.dumps({"balance": 1, "subscribe": 1}))
             for asset in ASSETS:
                 await dws.send(json.dumps({"ticks": asset, "subscribe": 1}))
                 await asyncio.sleep(0.05)
             await dws.send(json.dumps({"proposal_open_contracts": 1, "subscribe": 1}))
-            ss.log(f"📊 Monitorando {len(ASSETS)} ativos | {estrategia}", "info")
 
+            ss.log(f"📊 Monitorando {len(ASSETS)} ativos | Estratégia: {estrategia}", "info")
+            ss.log(f"⏳ Coletando histórico de ticks (aguarde ~20s)…", "info")
+
+            # ── FUNÇÃO INTERNA: ENVIAR PROPOSTA ───────────────────────
             async def request_proposal(asset, direction, conf, motivo):
-                rid = uuid.uuid4().hex[:10]
-                pending_p[rid] = {"asset": asset, "direction": direction,
-                                  "conf": conf, "motivo": motivo, "stake": stake}
+                req_ctr[0] += 1
+                rid = req_ctr[0]  # INTEIRO — Deriv exige inteiro
+                pending_p[rid] = {
+                    "asset": asset, "direction": direction,
+                    "conf": conf, "motivo": motivo
+                }
                 await dws.send(json.dumps({
-                    "proposal": 1, "req_id": rid,
-                    "amount": stake, "basis": "stake",
-                    "contract_type": direction, "currency": currency,
-                    "duration": config["duracao"], "duration_unit": "m",
-                    "symbol": asset,
+                    "proposal":       1,
+                    "req_id":         rid,          # inteiro
+                    "amount":         stake,
+                    "basis":          "stake",
+                    "contract_type":  direction,    # "CALL" ou "PUT"
+                    "currency":       currency,
+                    "duration":       config["duracao"],
+                    "duration_unit":  "m",
+                    "symbol":         asset,
                 }))
+                aname = ASSET_NAMES.get(asset, asset)
+                ss.log(f"📡 Proposta enviada: {direction} {aname} (req#{rid})", "info")
 
+            # ── LOOP PRINCIPAL ────────────────────────────────────────
             while not ss.stop_evt.is_set():
                 try:
                     raw = await asyncio.wait_for(dws.recv(), timeout=30)
                 except asyncio.TimeoutError:
                     if ss.stop_evt.is_set(): break
                     await dws.send(json.dumps({"ping": 1}))
+                    # Status periódico a cada 60s
+                    now = time.time()
+                    if now - last_status[0] > 60:
+                        last_status[0] = now
+                        counts = {a: len(tick_buf[a]) for a in ASSETS}
+                        ss.log(f"📈 Ticks coletados: {counts}", "info")
                     continue
 
                 msg   = json.loads(raw)
                 mtype = msg.get("msg_type", "")
 
-                if mtype == "error" or ("error" in msg and mtype != "buy"):
+                # ── ERRO GENÉRICO ──────────────────────────────────────
+                if mtype == "error":
                     em = (msg.get("error") or {}).get("message", "?")
-                    ss.log(f"⚠️ {em}", "warn"); continue
+                    ss.log(f"⚠️ Erro Deriv: {em}", "warn")
+                    continue
 
+                # ── SALDO ──────────────────────────────────────────────
                 if mtype == "balance":
-                    b = float(msg.get("balance", {}).get("balance", 0))
-                    ss.update_estado(saldo=b); continue
+                    b = float((msg.get("balance") or {}).get("balance", 0))
+                    ss.update_estado(saldo=b)
+                    continue
 
+                # ── TICK ───────────────────────────────────────────────
                 if mtype == "tick":
                     tick  = msg.get("tick", {})
                     asset = tick.get("symbol", "")
                     price = float(tick.get("quote", 0))
-                    if asset not in tick_buf: continue
+                    if asset not in tick_buf:
+                        continue
                     tick_buf[asset].append(price)
-                    if len(tick_buf[asset]) > 120:
-                        tick_buf[asset] = tick_buf[asset][-120:]
-                    now      = time.time()
-                    cooldown = config["duracao"] * 60 + 30
-                    if now - last_trade[asset] < cooldown: continue
+                    if len(tick_buf[asset]) > 200:
+                        tick_buf[asset] = tick_buf[asset][-200:]
+
+                    n_ticks = len(tick_buf[asset])
+                    if n_ticks < 21:
+                        continue  # Aguarda histórico suficiente
+
+                    # Status periódico de diagnóstico
+                    now = time.time()
+                    if now - last_status[0] > 60:
+                        last_status[0] = now
+                        rsi_now = calc_rsi(tick_buf[asset], 14)
+                        ss.log(f"🔍 RSI {ASSET_NAMES.get(asset,asset)}: {rsi_now:.1f} "
+                               f"(limite: <{config['rsi_lower']} ou >{config['rsi_upper']})", "info")
+
+                    cooldown = config["duracao"] * 60 + 15
+                    if now - last_trade[asset] < cooldown:
+                        continue
+
                     direction, conf, motivo, votos = calc_signal(tick_buf[asset], config)
                     if direction and conf >= config["conf_min"]:
                         aname = ASSET_NAMES.get(asset, asset)
@@ -347,66 +401,109 @@ async def _deriv_bot_async(ss: SessionState, token: str, stake: float, estrategi
                         await request_proposal(asset, direction, conf, motivo)
                     continue
 
+                # ── PROPOSTA RECEBIDA ─────────────────────────────────
                 if mtype == "proposal":
-                    rid = msg.get("req_id", "")
-                    if rid not in pending_p: continue
+                    rid = msg.get("req_id")
+                    if rid is None or rid not in pending_p:
+                        continue
                     info = pending_p.pop(rid)
+
                     if "error" in msg:
-                        ss.log(f"⚠️ Proposta recusada: {msg['error'].get('message','?')}", "warn"); continue
-                    pid = (msg.get("proposal") or {}).get("id", "")
-                    if not pid: continue
+                        err_msg = msg["error"].get("message", "?")
+                        ss.log(f"⚠️ Proposta recusada (req#{rid}): {err_msg}", "warn")
+                        continue
+
+                    prop      = msg.get("proposal") or {}
+                    pid       = prop.get("id", "")
+                    ask_price = float(prop.get("ask_price", stake))  # Preço real da Deriv
+
+                    if not pid:
+                        ss.log("⚠️ Proposta sem ID recebida", "warn")
+                        continue
+
                     trade_count += 1
-                    tid   = f"T{trade_count}"
+                    req_ctr[0] += 1
+                    buy_rid = req_ctr[0]  # Inteiro para o buy também
+
                     aname = ASSET_NAMES.get(info["asset"], info["asset"])
-                    ss.trade(tid, aname, info["direction"].lower(), info["stake"])
-                    ss.log(f"🔄 {info['direction']} {aname} ${info['stake']:.2f} | {info['motivo']}", "info")
-                    await dws.send(json.dumps({"buy": pid, "req_id": tid, "price": info["stake"]}))
+                    ss.trade(f"T{trade_count}", aname, info["direction"].lower(), stake)
+                    ss.log(f"🛒 Comprando contrato: {info['direction']} {aname} "
+                           f"${stake:.2f} (ask: ${ask_price:.2f})", "info")
+
+                    # FIX: usa ask_price, não stake (evita rejeição por preço incorreto)
+                    await dws.send(json.dumps({
+                        "buy":    pid,
+                        "req_id": buy_rid,
+                        "price":  ask_price,
+                    }))
                     continue
 
+                # ── COMPRA CONFIRMADA ─────────────────────────────────
                 if mtype == "buy":
                     if "error" in msg:
-                        ss.log(f"❌ Compra recusada: {msg['error'].get('message','?')}", "loss"); continue
+                        err_msg = msg["error"].get("message", "?")
+                        ss.log(f"❌ Compra recusada: {err_msg}", "loss")
+                        # Diagnóstico de erros comuns
+                        if "balance" in err_msg.lower():
+                            ss.log("→ Saldo insuficiente para esta operação", "warn")
+                        elif "market" in err_msg.lower():
+                            ss.log("→ Mercado fechado ou fora de horário", "warn")
+                        continue
+
                     bd  = msg.get("buy", {})
                     cid = str(bd.get("contract_id", ""))
                     bp  = float(bd.get("buy_price", stake))
-                    tid = msg.get("req_id", "?")
+
                     if cid:
+                        tid = f"T{trade_count}"
                         active_cx[cid] = {"tid": tid, "buy_price": bp}
-                        ss.log(f"✅ Contrato {cid} aberto", "win")
+                        ss.log(f"✅ Contrato #{cid} aberto — ${bp:.2f}", "win")
                     continue
 
+                # ── RESULTADO DO CONTRATO ──────────────────────────────
                 if mtype == "proposal_open_contracts":
                     poc  = msg.get("proposal_open_contracts", {})
                     cid  = str(poc.get("contract_id", ""))
                     stat = poc.get("status", "")
-                    if cid not in active_cx or stat not in ("won", "lost"): continue
-                    info = active_cx.pop(cid)
+
+                    if not cid or cid not in active_cx:
+                        continue
+                    if stat not in ("won", "lost", "sold"):
+                        continue  # Contrato ainda aberto
+
+                    info   = active_cx.pop(cid)
                     profit = float(poc.get("profit", 0))
                     bp     = info["buy_price"]
                     tid    = info["tid"]
+
                     if stat == "won":
-                        wins += 1; lucro_total += profit
-                        ss.log(f"✅ WIN  +${profit:.2f}", "win")
+                        wins        += 1
+                        lucro_total += profit
+                        ss.log(f"✅ WIN  +${profit:.2f} | Total: ${lucro_total:+.2f}", "win")
                         ss.resultado(tid, "W", profit)
                     else:
-                        losses += 1; lucro_total -= bp
-                        ss.log(f"❌ LOSS −${bp:.2f}", "loss")
+                        losses      += 1
+                        lucro_total -= bp
+                        ss.log(f"❌ LOSS −${bp:.2f} | Total: ${lucro_total:+.2f}", "loss")
                         ss.resultado(tid, "L", -bp)
+
                     ss.update_estado(wins=wins, losses=losses, lucro=lucro_total)
                     continue
 
     except Exception as e:
         if isinstance(e, asyncio.CancelledError):
-            ss.log("Bot encerrado.", "warn"); return
+            ss.log("Bot encerrado.", "warn")
+            return
         import traceback
-        ss.log(f"❌ Erro: {e}", "loss")
+        ss.log(f"❌ Erro inesperado: {e}", "loss")
         print(f"[BOT ERROR] {traceback.format_exc()}", flush=True)
     finally:
         ss.update_estado(rodando=False, conectado=False)
         ss.log("Robô desconectado.", "warn")
 
 
-def start_bot(ss: SessionState, token: str, stake: float, estrategia: str, want_demo: bool = False):
+def start_bot(ss: SessionState, token: str, stake: float,
+              estrategia: str, want_demo: bool = False):
     if ss.estado_snap.get("rodando"):
         return
     ss.stop_evt.clear()
@@ -415,7 +512,9 @@ def start_bot(ss: SessionState, token: str, stake: float, estrategia: str, want_
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
         try:
-            loop.run_until_complete(_deriv_bot_async(ss, token, stake, estrategia, want_demo))
+            loop.run_until_complete(
+                _deriv_bot_async(ss, token, stake, estrategia, want_demo)
+            )
         except Exception as e:
             ss.log(f"Robô encerrado: {e}", "warn")
         finally:
@@ -508,6 +607,33 @@ def logout():
 
 
 # ════════════════════════════════════════════════════════
+#  ROTAS — TOKEN DERIV (auto-salvo por usuário)
+# ════════════════════════════════════════════════════════
+@app.route("/api/token", methods=["GET"])
+@login_required
+def get_saved_token():
+    """Retorna o token Deriv salvo para o usuário atual."""
+    uid = session["user_id"]
+    with get_db() as conn:
+        row = conn.execute(
+            "SELECT deriv_token FROM users WHERE id=?", (uid,)
+        ).fetchone()
+    token = (row["deriv_token"] or "") if row else ""
+    return jsonify({"ok": True, "token": token})
+
+
+@app.route("/api/token/clear", methods=["POST"])
+@login_required
+def clear_saved_token():
+    """Remove o token salvo do usuário."""
+    uid = session["user_id"]
+    with get_db() as conn:
+        conn.execute("UPDATE users SET deriv_token='' WHERE id=?", (uid,))
+        conn.commit()
+    return jsonify({"ok": True})
+
+
+# ════════════════════════════════════════════════════════
 #  ROTAS — ADMIN
 # ════════════════════════════════════════════════════════
 @app.route("/admin")
@@ -584,7 +710,7 @@ def api_estado():
 @app.route("/api/start", methods=["POST"])
 @login_required
 def api_start():
-    sid = session.get("sid") or request.json.get("sid", "")
+    sid = session.get("sid") or ""
     if not sid:
         sid = uuid.uuid4().hex
         session["sid"] = sid
@@ -601,6 +727,15 @@ def api_start():
         return jsonify({"ok": False, "error": "Token API obrigatório"}), 400
     if ss.estado_snap.get("rodando"):
         return jsonify({"ok": False, "error": "Robô já está rodando"}), 400
+
+    # Salva o token para o usuário (auto-preenchimento futuro)
+    uid = session["user_id"]
+    try:
+        with get_db() as conn:
+            conn.execute("UPDATE users SET deriv_token=? WHERE id=?", (token, uid))
+            conn.commit()
+    except Exception:
+        pass
 
     try:
         start_bot(ss, token, stake, estrategia, want_demo)
