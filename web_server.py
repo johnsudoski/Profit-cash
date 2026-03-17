@@ -251,264 +251,284 @@ async def _deriv_bot_async(ss: SessionState, token: str, stake: float,
     ss.log("Conectando à Deriv…", "info")
     ss.update_estado(rodando=True)
 
-    try:
-        async with websockets.connect(
-            DERIV_WS, ping_interval=20, ping_timeout=30, open_timeout=20
-        ) as dws:
-            ss.log("✅ WebSocket estabelecido.", "info")
+    _max_reconnects = 5
+    for _attempt in range(_max_reconnects):
+        if ss.stop_evt.is_set():
+            break
+        if _attempt > 0:
+            _wait = min(5 * _attempt, 30)
+            ss.log(f"🔄 Reconectando em {_wait}s… (tentativa {_attempt}/{_max_reconnects})", "warn")
+            await asyncio.sleep(_wait)
+            if ss.stop_evt.is_set():
+                break
+        try:
+            async with websockets.connect(
+                DERIV_WS, ping_interval=20, ping_timeout=30, open_timeout=20
+            ) as dws:
+                ss.log("✅ WebSocket estabelecido.", "info")
 
-            # ── AUTORIZAÇÃO ───────────────────────────────────────────
-            await dws.send(json.dumps({"authorize": token}))
-            raw  = await asyncio.wait_for(dws.recv(), timeout=20)
-            auth = json.loads(raw)
+                # ── AUTORIZAÇÃO ───────────────────────────────────────────
+                await dws.send(json.dumps({"authorize": token}))
+                raw  = await asyncio.wait_for(dws.recv(), timeout=20)
+                auth = json.loads(raw)
 
-            if "error" in auth:
-                err = auth["error"].get("message", "Token inválido")
-                ss.log(f"❌ Autenticação falhou: {err}", "loss")
-                ss.log("→ Verifique o token em app.deriv.com → Conta → Token API", "warn")
-                ss.log("→ Precisa ter permissão 'Trade' ativada", "warn")
-                return
+                if "error" in auth:
+                    err = auth["error"].get("message", "Token inválido")
+                    ss.log(f"❌ Autenticação falhou: {err}", "loss")
+                    ss.log("→ Verifique o token em app.deriv.com → Conta → Token API", "warn")
+                    ss.log("→ Precisa ter permissão 'Trade' ativada", "warn")
+                    break  # token inválido — não tenta reconectar
 
-            acct    = auth.get("authorize", {})
-            is_virt = bool(acct.get("is_virtual", False))
+                acct    = auth.get("authorize", {})
+                is_virt = bool(acct.get("is_virtual", False))
 
-            # ── TROCA DE CONTA (Demo ↔ Real) ──────────────────────────
-            if want_demo != is_virt:
-                acct_list = acct.get("account_list", [])
-                targets = [a for a in acct_list
-                           if bool(a.get("is_virtual", False)) == want_demo
-                           and a.get("token")]
-                if targets:
-                    new_token = targets[0]["token"]
-                    tipo_str  = "Demo 🧪" if want_demo else "Real 💰"
-                    ss.log(f"🔄 Alternando para conta {tipo_str}…", "info")
-                    await dws.send(json.dumps({"authorize": new_token}))
-                    raw2  = await asyncio.wait_for(dws.recv(), timeout=20)
-                    auth2 = json.loads(raw2)
-                    if "error" not in auth2:
-                        acct    = auth2.get("authorize", {})
-                        is_virt = bool(acct.get("is_virtual", False))
+                # ── TROCA DE CONTA (Demo ↔ Real) ──────────────────────────
+                if want_demo != is_virt:
+                    acct_list = acct.get("account_list", [])
+                    targets = [a for a in acct_list
+                               if bool(a.get("is_virtual", False)) == want_demo
+                               and a.get("token")]
+                    if targets:
+                        new_token = targets[0]["token"]
+                        tipo_str  = "Demo 🧪" if want_demo else "Real 💰"
+                        ss.log(f"🔄 Alternando para conta {tipo_str}…", "info")
+                        await dws.send(json.dumps({"authorize": new_token}))
+                        raw2  = await asyncio.wait_for(dws.recv(), timeout=20)
+                        auth2 = json.loads(raw2)
+                        if "error" not in auth2:
+                            acct    = auth2.get("authorize", {})
+                            is_virt = bool(acct.get("is_virtual", False))
+                        else:
+                            ss.log("⚠️ Falha ao trocar conta, continuando com a atual.", "warn")
                     else:
-                        ss.log("⚠️ Falha ao trocar conta, continuando com a atual.", "warn")
-                else:
-                    tipo_str = "Demo 🧪" if want_demo else "Real 💰"
-                    ss.log(f"⚠️ Conta {tipo_str} não encontrada. Usando a atual.", "warn")
+                        tipo_str = "Demo 🧪" if want_demo else "Real 💰"
+                        ss.log(f"⚠️ Conta {tipo_str} não encontrada. Usando a atual.", "warn")
 
-            loginid  = acct.get("loginid", "?")
-            saldo0   = float(acct.get("balance", 0))
-            currency = acct.get("currency", "USD")
-            is_virt  = bool(acct.get("is_virtual", False))
-            tipo     = "Demo 🧪" if is_virt else "Real 💰"
+                loginid  = acct.get("loginid", "?")
+                saldo0   = float(acct.get("balance", 0))
+                currency = acct.get("currency", "USD")
+                is_virt  = bool(acct.get("is_virtual", False))
+                tipo     = "Demo 🧪" if is_virt else "Real 💰"
 
-            ss.log(f"✅ Conta {loginid} ({tipo}) autenticada!", "win")
-            ss.log(f"💰 Saldo inicial: {saldo0:.2f} {currency}", "info")
-            ss.update_estado(saldo=saldo0, conectado=True)
+                ss.log(f"✅ Conta {loginid} ({tipo}) autenticada!", "win")
+                ss.log(f"💰 Saldo inicial: {saldo0:.2f} {currency}", "info")
+                ss.update_estado(saldo=saldo0, conectado=True)
+                _attempt = 0  # reset contador ao conectar com sucesso
 
-            # ── SUBSCRIÇÕES ───────────────────────────────────────────
-            await dws.send(json.dumps({"balance": 1, "subscribe": 1}))
-            for asset in ASSETS:
-                await dws.send(json.dumps({"ticks": asset, "subscribe": 1}))
-                await asyncio.sleep(0.05)
-            ss.log(f"📊 Monitorando {len(ASSETS)} ativos | Estratégia: {estrategia}", "info")
-            ss.log(f"⏳ Coletando histórico de ticks (aguarde ~20s)…", "info")
+                # ── SUBSCRIÇÕES ───────────────────────────────────────────
+                await dws.send(json.dumps({"balance": 1, "subscribe": 1}))
+                for asset in ASSETS:
+                    await dws.send(json.dumps({"ticks": asset, "subscribe": 1}))
+                    await asyncio.sleep(0.05)
+                ss.log(f"📊 Monitorando {len(ASSETS)} ativos | Estratégia: {estrategia}", "info")
+                ss.log(f"⏳ Coletando histórico de ticks (aguarde ~20s)…", "info")
 
-            # ── FUNÇÃO INTERNA: ENVIAR PROPOSTA ───────────────────────
-            async def request_proposal(asset, direction, conf, motivo):
-                req_ctr[0] += 1
-                rid = req_ctr[0]  # INTEIRO — Deriv exige inteiro
-                pending_p[rid] = {
-                    "asset": asset, "direction": direction,
-                    "conf": conf, "motivo": motivo
-                }
-                await dws.send(json.dumps({
-                    "proposal":       1,
-                    "req_id":         rid,          # inteiro
-                    "amount":         stake,
-                    "basis":          "stake",
-                    "contract_type":  direction,    # "CALL" ou "PUT"
-                    "currency":       currency,
-                    "duration":       config["duracao"],
-                    "duration_unit":  "m",
-                    "symbol":         asset,
-                }))
-                aname = ASSET_NAMES.get(asset, asset)
-                ss.log(f"📡 Proposta enviada: {direction} {aname} (req#{rid})", "info")
-
-            # ── LOOP PRINCIPAL ────────────────────────────────────────
-            while not ss.stop_evt.is_set():
-                try:
-                    raw = await asyncio.wait_for(dws.recv(), timeout=30)
-                except asyncio.TimeoutError:
-                    if ss.stop_evt.is_set(): break
-                    await dws.send(json.dumps({"ping": 1}))
-                    # Status periódico a cada 60s
-                    now = time.time()
-                    if now - last_status[0] > 60:
-                        last_status[0] = now
-                        counts = {a: len(tick_buf[a]) for a in ASSETS}
-                        ss.log(f"📈 Ticks coletados: {counts}", "info")
-                    continue
-
-                msg   = json.loads(raw)
-                mtype = msg.get("msg_type", "")
-
-                # ── ERRO GENÉRICO ──────────────────────────────────────
-                if mtype == "error":
-                    err_obj = msg.get("error") or {}
-                    em   = err_obj.get("message", "?")
-                    code = err_obj.get("code", "?")
-                    rid  = msg.get("req_id", "?")
-                    ss.log(f"⚠️ Deriv [{code}] req#{rid}: {em}", "warn")
-                    continue
-
-                # ── SALDO ──────────────────────────────────────────────
-                if mtype == "balance":
-                    b = float((msg.get("balance") or {}).get("balance", 0))
-                    ss.update_estado(saldo=b)
-                    continue
-
-                # ── TICK ───────────────────────────────────────────────
-                if mtype == "tick":
-                    tick  = msg.get("tick", {})
-                    asset = tick.get("symbol", "")
-                    price = float(tick.get("quote", 0))
-                    if asset not in tick_buf:
-                        continue
-                    tick_buf[asset].append(price)
-                    if len(tick_buf[asset]) > 200:
-                        tick_buf[asset] = tick_buf[asset][-200:]
-
-                    n_ticks = len(tick_buf[asset])
-                    if n_ticks < 21:
-                        continue  # Aguarda histórico suficiente
-
-                    # Status periódico de diagnóstico
-                    now = time.time()
-                    if now - last_status[0] > 60:
-                        last_status[0] = now
-                        rsi_now = calc_rsi(tick_buf[asset], 14)
-                        ss.log(f"🔍 RSI {ASSET_NAMES.get(asset,asset)}: {rsi_now:.1f} "
-                               f"(limite: <{config['rsi_lower']} ou >{config['rsi_upper']})", "info")
-
-                    cooldown = config["duracao"] * 60 + 15
-                    if now - last_trade[asset] < cooldown:
-                        continue
-
-                    direction, conf, motivo, votos = calc_signal(tick_buf[asset], config)
-                    if direction and conf >= config["conf_min"]:
-                        aname = ASSET_NAMES.get(asset, asset)
-                        ss.sinal(aname, direction, conf, motivo, votos)
-                        last_trade[asset] = now
-                        await request_proposal(asset, direction, conf, motivo)
-                    continue
-
-                # ── PROPOSTA RECEBIDA ─────────────────────────────────
-                if mtype == "proposal":
-                    rid = msg.get("req_id")
-                    if rid is None or rid not in pending_p:
-                        continue
-                    info = pending_p.pop(rid)
-
-                    if "error" in msg:
-                        err_msg = msg["error"].get("message", "?")
-                        ss.log(f"⚠️ Proposta recusada (req#{rid}): {err_msg}", "warn")
-                        continue
-
-                    prop      = msg.get("proposal") or {}
-                    pid       = prop.get("id", "")
-                    ask_price = float(prop.get("ask_price", stake))  # Preço real da Deriv
-
-                    if not pid:
-                        ss.log("⚠️ Proposta sem ID recebida", "warn")
-                        continue
-
-                    trade_count += 1
+                # ── FUNÇÃO INTERNA: ENVIAR PROPOSTA ───────────────────────
+                async def request_proposal(asset, direction, conf, motivo):
                     req_ctr[0] += 1
-                    buy_rid = req_ctr[0]  # Inteiro para o buy também
-
-                    aname = ASSET_NAMES.get(info["asset"], info["asset"])
-                    ss.trade(f"T{trade_count}", aname, info["direction"].lower(), stake)
-                    ss.log(f"🛒 Comprando contrato: {info['direction']} {aname} "
-                           f"${stake:.2f} (ask: ${ask_price:.2f})", "info")
-
-                    # FIX: usa ask_price, não stake (evita rejeição por preço incorreto)
+                    rid = req_ctr[0]  # INTEIRO — Deriv exige inteiro
+                    pending_p[rid] = {
+                        "asset": asset, "direction": direction,
+                        "conf": conf, "motivo": motivo
+                    }
                     await dws.send(json.dumps({
-                        "buy":    pid,
-                        "req_id": buy_rid,
-                        "price":  ask_price,
+                        "proposal":       1,
+                        "req_id":         rid,          # inteiro
+                        "amount":         stake,
+                        "basis":          "stake",
+                        "contract_type":  direction,    # "CALL" ou "PUT"
+                        "currency":       currency,
+                        "duration":       config["duracao"],
+                        "duration_unit":  "m",
+                        "symbol":         asset,
                     }))
-                    continue
+                    aname = ASSET_NAMES.get(asset, asset)
+                    ss.log(f"📡 Proposta enviada: {direction} {aname} (req#{rid})", "info")
 
-                # ── COMPRA CONFIRMADA ─────────────────────────────────
-                if mtype == "buy":
-                    if "error" in msg:
-                        err_msg = msg["error"].get("message", "?")
-                        ss.log(f"❌ Compra recusada: {err_msg}", "loss")
-                        # Diagnóstico de erros comuns
-                        if "balance" in err_msg.lower():
-                            ss.log("→ Saldo insuficiente para esta operação", "warn")
-                        elif "market" in err_msg.lower():
-                            ss.log("→ Mercado fechado ou fora de horário", "warn")
+                # ── LOOP PRINCIPAL ────────────────────────────────────────
+                while not ss.stop_evt.is_set():
+                    try:
+                        raw = await asyncio.wait_for(dws.recv(), timeout=30)
+                    except asyncio.TimeoutError:
+                        if ss.stop_evt.is_set(): break
+                        await dws.send(json.dumps({"ping": 1}))
+                        # Status periódico a cada 60s
+                        now = time.time()
+                        if now - last_status[0] > 60:
+                            last_status[0] = now
+                            counts = {a: len(tick_buf[a]) for a in ASSETS}
+                            ss.log(f"📈 Ticks coletados: {counts}", "info")
                         continue
 
-                    bd  = msg.get("buy", {})
-                    cid = str(bd.get("contract_id", ""))
-                    bp  = float(bd.get("buy_price", stake))
+                    msg   = json.loads(raw)
+                    mtype = msg.get("msg_type", "")
 
-                    if cid:
-                        tid = f"T{trade_count}"
-                        active_cx[cid] = {"tid": tid, "buy_price": bp}
-                        ss.log(f"✅ Contrato #{cid} aberto — ${bp:.2f}", "win")
-                        # Subscrição individual por contrato (evita "Unrecognised request")
+                    # ── ERRO GENÉRICO ──────────────────────────────────────
+                    if mtype == "error":
+                        err_obj = msg.get("error") or {}
+                        em   = err_obj.get("message", "?")
+                        code = err_obj.get("code", "?")
+                        rid  = msg.get("req_id", "?")
+                        ss.log(f"⚠️ Deriv [{code}] req#{rid}: {em}", "warn")
+                        continue
+
+                    # ── SALDO ──────────────────────────────────────────────
+                    if mtype == "balance":
+                        b = float((msg.get("balance") or {}).get("balance", 0))
+                        ss.update_estado(saldo=b)
+                        continue
+
+                    # ── TICK ───────────────────────────────────────────────
+                    if mtype == "tick":
+                        tick  = msg.get("tick", {})
+                        asset = tick.get("symbol", "")
+                        price = float(tick.get("quote", 0))
+                        if asset not in tick_buf:
+                            continue
+                        tick_buf[asset].append(price)
+                        if len(tick_buf[asset]) > 200:
+                            tick_buf[asset] = tick_buf[asset][-200:]
+
+                        n_ticks = len(tick_buf[asset])
+                        if n_ticks < 21:
+                            continue  # Aguarda histórico suficiente
+
+                        # Status periódico de diagnóstico
+                        now = time.time()
+                        if now - last_status[0] > 60:
+                            last_status[0] = now
+                            rsi_now = calc_rsi(tick_buf[asset], 14)
+                            ss.log(f"🔍 RSI {ASSET_NAMES.get(asset,asset)}: {rsi_now:.1f} "
+                                   f"(limite: <{config['rsi_lower']} ou >{config['rsi_upper']})", "info")
+
+                        cooldown = config["duracao"] * 60 + 15
+                        if now - last_trade[asset] < cooldown:
+                            continue
+
+                        direction, conf, motivo, votos = calc_signal(tick_buf[asset], config)
+                        if direction and conf >= config["conf_min"]:
+                            aname = ASSET_NAMES.get(asset, asset)
+                            ss.sinal(aname, direction, conf, motivo, votos)
+                            last_trade[asset] = now
+                            await request_proposal(asset, direction, conf, motivo)
+                        continue
+
+                    # ── PROPOSTA RECEBIDA ─────────────────────────────────
+                    if mtype == "proposal":
+                        rid = msg.get("req_id")
+                        if rid is None or rid not in pending_p:
+                            continue
+                        info = pending_p.pop(rid)
+
+                        if "error" in msg:
+                            err_msg = msg["error"].get("message", "?")
+                            ss.log(f"⚠️ Proposta recusada (req#{rid}): {err_msg}", "warn")
+                            continue
+
+                        prop      = msg.get("proposal") or {}
+                        pid       = prop.get("id", "")
+                        ask_price = float(prop.get("ask_price", stake))  # Preço real da Deriv
+
+                        if not pid:
+                            ss.log("⚠️ Proposta sem ID recebida", "warn")
+                            continue
+
+                        trade_count += 1
                         req_ctr[0] += 1
+                        buy_rid = req_ctr[0]  # Inteiro para o buy também
+
+                        aname = ASSET_NAMES.get(info["asset"], info["asset"])
+                        ss.trade(f"T{trade_count}", aname, info["direction"].lower(), stake)
+                        ss.log(f"🛒 Comprando contrato: {info['direction']} {aname} "
+                               f"${stake:.2f} (ask: ${ask_price:.2f})", "info")
+
+                        # FIX: usa ask_price, não stake (evita rejeição por preço incorreto)
                         await dws.send(json.dumps({
-                            "proposal_open_contracts": 1,
-                            "contract_id": int(cid),
-                            "subscribe": 1,
-                            "req_id": req_ctr[0],
+                            "buy":    pid,
+                            "req_id": buy_rid,
+                            "price":  ask_price,
                         }))
-                    continue
-
-                # ── RESULTADO DO CONTRATO ──────────────────────────────
-                if mtype == "proposal_open_contracts":
-                    poc  = msg.get("proposal_open_contracts", {})
-                    cid  = str(poc.get("contract_id", ""))
-                    stat = poc.get("status", "")
-
-                    if not cid or cid not in active_cx:
                         continue
-                    if stat not in ("won", "lost", "sold"):
-                        continue  # Contrato ainda aberto
 
-                    info   = active_cx.pop(cid)
-                    profit = float(poc.get("profit", 0))
-                    bp     = info["buy_price"]
-                    tid    = info["tid"]
+                    # ── COMPRA CONFIRMADA ─────────────────────────────────
+                    if mtype == "buy":
+                        if "error" in msg:
+                            err_msg = msg["error"].get("message", "?")
+                            ss.log(f"❌ Compra recusada: {err_msg}", "loss")
+                            # Diagnóstico de erros comuns
+                            if "balance" in err_msg.lower():
+                                ss.log("→ Saldo insuficiente para esta operação", "warn")
+                            elif "market" in err_msg.lower():
+                                ss.log("→ Mercado fechado ou fora de horário", "warn")
+                            continue
 
-                    if stat == "won":
-                        wins        += 1
-                        lucro_total += profit
-                        ss.log(f"✅ WIN  +${profit:.2f} | Total: ${lucro_total:+.2f}", "win")
-                        ss.resultado(tid, "W", profit)
-                    else:
-                        losses      += 1
-                        lucro_total -= bp
-                        ss.log(f"❌ LOSS −${bp:.2f} | Total: ${lucro_total:+.2f}", "loss")
-                        ss.resultado(tid, "L", -bp)
+                        bd  = msg.get("buy", {})
+                        cid = str(bd.get("contract_id", ""))
+                        bp  = float(bd.get("buy_price", stake))
 
-                    ss.update_estado(wins=wins, losses=losses, lucro=lucro_total)
-                    continue
+                        if cid:
+                            tid = f"T{trade_count}"
+                            active_cx[cid] = {"tid": tid, "buy_price": bp}
+                            ss.log(f"✅ Contrato #{cid} aberto — ${bp:.2f}", "win")
+                            # Subscrição individual por contrato (evita "Unrecognised request")
+                            req_ctr[0] += 1
+                            await dws.send(json.dumps({
+                                "proposal_open_contracts": 1,
+                                "contract_id": int(cid),
+                                "subscribe": 1,
+                                "req_id": req_ctr[0],
+                            }))
+                        continue
 
-    except Exception as e:
-        if isinstance(e, asyncio.CancelledError):
-            ss.log("Bot encerrado.", "warn")
-            return
-        import traceback
-        ss.log(f"❌ Erro inesperado: {e}", "loss")
-        print(f"[BOT ERROR] {traceback.format_exc()}", flush=True)
-    finally:
-        ss.update_estado(rodando=False, conectado=False)
-        ss.log("Robô desconectado.", "warn")
+                    # ── RESULTADO DO CONTRATO ──────────────────────────────
+                    if mtype == "proposal_open_contracts":
+                        poc  = msg.get("proposal_open_contracts", {})
+                        cid  = str(poc.get("contract_id", ""))
+                        stat = poc.get("status", "")
+
+                        if not cid or cid not in active_cx:
+                            continue
+                        if stat not in ("won", "lost", "sold"):
+                            continue  # Contrato ainda aberto
+
+                        info   = active_cx.pop(cid)
+                        profit = float(poc.get("profit", 0))
+                        bp     = info["buy_price"]
+                        tid    = info["tid"]
+
+                        if stat == "won":
+                            wins        += 1
+                            lucro_total += profit
+                            ss.log(f"✅ WIN  +${profit:.2f} | Total: ${lucro_total:+.2f}", "win")
+                            ss.resultado(tid, "W", profit)
+                        else:
+                            losses      += 1
+                            lucro_total -= bp
+                            ss.log(f"❌ LOSS −${bp:.2f} | Total: ${lucro_total:+.2f}", "loss")
+                            ss.resultado(tid, "L", -bp)
+
+                        ss.update_estado(wins=wins, losses=losses, lucro=lucro_total)
+                        continue
+
+        except websockets.exceptions.ConnectionClosed as e:
+            if ss.stop_evt.is_set():
+                break
+            ss.update_estado(conectado=False)
+            ss.log(f"⚠️ Conexão fechada inesperadamente: {e}", "warn")
+            # vai para próxima iteração do for (reconectar)
+        except Exception as e:
+            if isinstance(e, asyncio.CancelledError):
+                break
+            import traceback
+            ss.log(f"❌ Erro inesperado: {e}", "loss")
+            print(f"[BOT ERROR] {traceback.format_exc()}", flush=True)
+            break
+        else:
+            # async with saiu limpo (stop_evt ativado dentro do while)
+            break
+
+    ss.update_estado(rodando=False, conectado=False)
+    ss.log("Robô desconectado.", "warn")
 
 
 def start_bot(ss: SessionState, token: str, stake: float,
