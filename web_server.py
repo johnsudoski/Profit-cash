@@ -309,8 +309,6 @@ async def _deriv_bot_async(ss: SessionState, token: str, stake: float,
             for asset in ASSETS:
                 await dws.send(json.dumps({"ticks": asset, "subscribe": 1}))
                 await asyncio.sleep(0.05)
-            await dws.send(json.dumps({"proposal_open_contracts": 1, "subscribe": 1}))
-
             ss.log(f"📊 Monitorando {len(ASSETS)} ativos | Estratégia: {estrategia}", "info")
             ss.log(f"⏳ Coletando histórico de ticks (aguarde ~20s)…", "info")
 
@@ -356,8 +354,11 @@ async def _deriv_bot_async(ss: SessionState, token: str, stake: float,
 
                 # ── ERRO GENÉRICO ──────────────────────────────────────
                 if mtype == "error":
-                    em = (msg.get("error") or {}).get("message", "?")
-                    ss.log(f"⚠️ Erro Deriv: {em}", "warn")
+                    err_obj = msg.get("error") or {}
+                    em   = err_obj.get("message", "?")
+                    code = err_obj.get("code", "?")
+                    rid  = msg.get("req_id", "?")
+                    ss.log(f"⚠️ Deriv [{code}] req#{rid}: {em}", "warn")
                     continue
 
                 # ── SALDO ──────────────────────────────────────────────
@@ -458,6 +459,14 @@ async def _deriv_bot_async(ss: SessionState, token: str, stake: float,
                         tid = f"T{trade_count}"
                         active_cx[cid] = {"tid": tid, "buy_price": bp}
                         ss.log(f"✅ Contrato #{cid} aberto — ${bp:.2f}", "win")
+                        # Subscrição individual por contrato (evita "Unrecognised request")
+                        req_ctr[0] += 1
+                        await dws.send(json.dumps({
+                            "proposal_open_contracts": 1,
+                            "contract_id": int(cid),
+                            "subscribe": 1,
+                            "req_id": req_ctr[0],
+                        }))
                     continue
 
                 # ── RESULTADO DO CONTRATO ──────────────────────────────
