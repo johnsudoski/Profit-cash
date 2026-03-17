@@ -710,13 +710,16 @@ def api_estado():
 @app.route("/api/start", methods=["POST"])
 @login_required
 def api_start():
-    sid = session.get("sid") or ""
-    if not sid:
-        sid = uuid.uuid4().hex
-        session["sid"] = sid
+    data = request.get_json(force=True) or {}
+
+    # CRÍTICO: usar o SID que veio do cliente (localStorage)
+    # O WebSocket do browser conecta com ESSE SID.
+    # Se usarmos session["sid"] (diferente), o bot roda num SessionState
+    # diferente do que o WS está escutando → logs nunca aparecem na tela.
+    sid = data.get("sid", "").strip() or session.get("sid") or uuid.uuid4().hex
+    session["sid"] = sid  # manter sessão sincronizada
 
     ss   = get_or_create_session(sid)
-    data = request.get_json(force=True) or {}
 
     token      = data.get("token", "").strip()
     stake      = max(1.0, float(data.get("valor", 5.0)))
@@ -747,7 +750,9 @@ def api_start():
 @app.route("/api/stop", methods=["POST"])
 @login_required
 def api_stop():
-    sid = session.get("sid", "")
+    data = request.get_json(force=True) or {}
+    # Também usa o SID do cliente para encontrar o bot certo
+    sid = data.get("sid", "").strip() or session.get("sid", "")
     if sid and sid in _sessions:
         stop_bot(_sessions[sid])
     return jsonify({"ok": True})
@@ -765,7 +770,10 @@ def ws_handler(ws, sid):
     try:
         while True:
             msg = ws.receive(timeout=30)
-            if msg is None: break
+            # timeout retorna None — NÃO fechar, apenas continuar (keepalive)
+            # Só break se receber None depois de uma exceção (conexão fechada de vez)
+            if msg is None:
+                continue
     except Exception:
         pass
     finally:
