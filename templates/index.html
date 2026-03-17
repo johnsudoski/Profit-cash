@@ -169,6 +169,57 @@ html,body{
 }
 .token-saved-badge:active{opacity:.6}
 
+/* Token Modal */
+.tmodal-overlay{
+  position:fixed;inset:0;background:rgba(0,0,0,.75);backdrop-filter:blur(6px);
+  z-index:1000;display:flex;align-items:flex-end;justify-content:center;
+  opacity:0;pointer-events:none;transition:opacity .25s;
+}
+.tmodal-overlay.open{opacity:1;pointer-events:all}
+.tmodal{
+  background:#1C1C1E;border-radius:20px 20px 0 0;width:100%;max-width:480px;
+  padding:24px 20px 40px;transform:translateY(100%);transition:transform .3s cubic-bezier(.32,1,.23,1);
+}
+.tmodal-overlay.open .tmodal{transform:translateY(0)}
+.tmodal-title{font-size:18px;font-weight:700;color:#fff;margin-bottom:4px}
+.tmodal-sub{font-size:13px;color:rgba(235,235,245,.5);margin-bottom:20px}
+.tmodal-step{
+  display:flex;gap:12px;align-items:flex-start;
+  padding:12px 14px;background:#2C2C2E;border-radius:12px;margin-bottom:10px;
+}
+.tmodal-step-num{
+  min-width:26px;height:26px;border-radius:50%;
+  background:var(--blue);color:#fff;font-size:12px;font-weight:700;
+  display:flex;align-items:center;justify-content:center;margin-top:1px;
+}
+.tmodal-step-text{font-size:13px;color:rgba(235,235,245,.85);line-height:1.5}
+.tmodal-step-text strong{color:#fff}
+.tmodal-btn-primary{
+  display:flex;align-items:center;justify-content:center;gap:8px;
+  background:linear-gradient(135deg,#e31c5f,#c0002a);color:#fff;
+  font-size:15px;font-weight:700;border-radius:14px;padding:14px;
+  width:100%;border:none;cursor:pointer;margin-top:16px;text-decoration:none;
+  box-shadow:0 4px 20px rgba(227,28,95,.35);
+}
+.tmodal-paste-area{
+  display:flex;gap:8px;margin-top:14px;
+}
+.tmodal-paste-input{
+  flex:1;background:#2C2C2E;border:1.5px solid rgba(255,255,255,.1);
+  border-radius:10px;padding:12px 14px;color:#fff;font-size:14px;
+  outline:none;
+}
+.tmodal-paste-input:focus{border-color:var(--blue)}
+.tmodal-paste-btn{
+  background:var(--blue);color:#fff;font-size:13px;font-weight:700;
+  border:none;border-radius:10px;padding:0 16px;cursor:pointer;white-space:nowrap;
+}
+.tmodal-close{
+  float:right;background:rgba(255,255,255,.1);border:none;color:#fff;
+  border-radius:50%;width:28px;height:28px;font-size:16px;cursor:pointer;
+  display:flex;align-items:center;justify-content:center;
+}
+
 /* Account Segmented Control */
 .acct-seg{
   display:flex;background:var(--fill3);border-radius:8px;padding:2px;margin-left:auto;
@@ -392,29 +443,29 @@ html,body{
             </div>
           </div>
           <!-- Token -->
-          <div class="form-row">
+          <div class="form-row" id="tokenRow" style="display:none">
             <div class="form-icon">🔑</div>
             <label class="form-label" for="token">Token</label>
             <input class="form-input" type="password" id="token"
               placeholder="Cole seu Token API aqui"
               autocomplete="off" spellcheck="false">
-            <!-- Badge: token salvo (clique para limpar) -->
             <div class="token-saved-badge" id="tokenBadge" onclick="clearToken()" title="Clique para remover token salvo">
               ✓ Salvo
             </div>
           </div>
-          <!-- Botão Conectar Deriv (OAuth) — aparece se app_id configurado -->
-          <div id="oauthRow" style="display:none;margin-top:8px">
-            <a id="oauthBtn" href="/oauth/deriv"
-               style="display:flex;align-items:center;justify-content:center;gap:8px;
-                      background:linear-gradient(135deg,#e31c5f,#f30b0b);
-                      color:#fff;font-size:14px;font-weight:600;border-radius:12px;
-                      padding:12px 16px;text-decoration:none;width:100%;box-sizing:border-box">
-              <span style="font-size:20px">🔗</span>
-              Conectar conta Deriv automaticamente
-            </a>
-            <p style="font-size:11px;color:rgba(235,235,245,0.45);text-align:center;margin-top:6px">
-              Autorize uma vez — token preenchido automaticamente sempre que entrar
+          <!-- Bloco token: estado sem token -->
+          <div id="tokenSetup" style="margin-top:4px">
+            <button onclick="openTokenModal()"
+              style="display:flex;align-items:center;justify-content:center;gap:10px;
+                     background:linear-gradient(135deg,#e31c5f,#c0002a);
+                     color:#fff;font-size:15px;font-weight:700;border-radius:14px;
+                     padding:14px 16px;width:100%;border:none;cursor:pointer;
+                     box-shadow:0 4px 20px rgba(227,28,95,0.35)">
+              <span style="font-size:22px">🔗</span>
+              Conectar minha conta Deriv
+            </button>
+            <p style="font-size:11px;color:rgba(235,235,245,0.40);text-align:center;margin-top:7px">
+              Feito uma vez — token salvo automaticamente para sempre
             </p>
           </div>
           <!-- Entrada -->
@@ -771,6 +822,116 @@ connectWS();
 loadSavedToken();         // Busca token salvo automaticamente
 checkOAuthAvailability(); // Exibe botão "Conectar Deriv" se configurado
 handleOAuthReturn();      // Trata ?oauth=success/error vindo do callback
+initTokenUI();            // Mostra campo manual ou botão conforme estado
+</script>
+
+<!-- ── Modal: Como obter o token Deriv ─────────────────────────────────── -->
+<div class="tmodal-overlay" id="tokenModal" onclick="closeTokenModal(event)">
+  <div class="tmodal">
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px">
+      <span class="tmodal-title">Conectar conta Deriv</span>
+      <button class="tmodal-close" onclick="closeTokenModal()">✕</button>
+    </div>
+    <p class="tmodal-sub">Feito uma vez — salvo automaticamente para sempre</p>
+
+    <div class="tmodal-step">
+      <div class="tmodal-step-num">1</div>
+      <div class="tmodal-step-text">
+        Clique no botão abaixo para abrir a Deriv em uma nova aba
+      </div>
+    </div>
+    <div class="tmodal-step">
+      <div class="tmodal-step-num">2</div>
+      <div class="tmodal-step-text">
+        Faça login na sua conta Deriv (ou crie uma gratuitamente)
+      </div>
+    </div>
+    <div class="tmodal-step">
+      <div class="tmodal-step-num">3</div>
+      <div class="tmodal-step-text">
+        Na página que abrir, clique em <strong>"Create token"</strong>,<br>
+        marque <strong>Read</strong> e <strong>Trade</strong>, dê um nome e clique em <strong>Create</strong>
+      </div>
+    </div>
+    <div class="tmodal-step">
+      <div class="tmodal-step-num">4</div>
+      <div class="tmodal-step-text">
+        Copie o token gerado e cole no campo abaixo — salvamos automaticamente
+      </div>
+    </div>
+
+    <a class="tmodal-btn-primary" href="https://app.deriv.com/account/api-token" target="_blank" onclick="onOpenDeriv()">
+      <span style="font-size:20px">🔗</span> Abrir Deriv — criar meu token
+    </a>
+
+    <div class="tmodal-paste-area" id="pasteArea" style="display:none">
+      <input class="tmodal-paste-input" id="pasteToken"
+        type="password" placeholder="Cole o token aqui…" autocomplete="off">
+      <button class="tmodal-paste-btn" onclick="saveModalToken()">Salvar</button>
+    </div>
+    <p id="pasteHint" style="display:none;font-size:11px;color:rgba(235,235,245,.45);margin-top:8px;text-align:center">
+      ✅ Aba aberta! Cole o token quando criar na Deriv
+    </p>
+  </div>
+</div>
+
+<script>
+// ── Token UI ────────────────────────────────────────────────────────────────
+function initTokenUI() {
+  // Depois que loadSavedToken() roda, decide o que mostrar
+  setTimeout(() => {
+    const hasToken = el('token').value.trim().length > 0;
+    el('tokenRow').style.display   = hasToken ? 'flex' : 'none';
+    el('tokenSetup').style.display = hasToken ? 'none' : 'block';
+  }, 600); // aguarda loadSavedToken terminar
+}
+
+function openTokenModal() {
+  el('tokenModal').classList.add('open');
+  el('pasteArea').style.display = 'none';
+  el('pasteHint').style.display = 'none';
+  el('pasteToken').value = '';
+}
+
+function closeTokenModal(e) {
+  if (e && e.target !== el('tokenModal')) return;
+  el('tokenModal').classList.remove('open');
+}
+
+function onOpenDeriv() {
+  el('pasteArea').style.display = 'flex';
+  el('pasteHint').style.display = 'block';
+  el('pasteToken').focus();
+}
+
+async function saveModalToken() {
+  const t = el('pasteToken').value.trim();
+  if (!t) { toast('Cole o token primeiro'); return; }
+
+  // Preenche o campo principal
+  el('token').value = t;
+
+  // Salva no banco imediatamente via /api/start-like endpoint
+  try {
+    await fetch(`${API}/api/token/save`, {
+      method: 'POST',
+      headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({ token: t })
+    });
+  } catch(e) {}
+
+  // Atualiza UI
+  el('tokenBadge').style.display = 'flex';
+  el('tokenRow').style.display   = 'flex';
+  el('tokenSetup').style.display = 'none';
+  el('tokenModal').classList.remove('open');
+  toast('✅ Token salvo! Robô pronto para usar.');
+}
+
+// Permite fechar modal com ESC
+document.addEventListener('keydown', e => {
+  if (e.key === 'Escape') el('tokenModal').classList.remove('open');
+});
 </script>
 
 </body>

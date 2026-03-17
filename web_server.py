@@ -681,6 +681,21 @@ def get_saved_token():
     return jsonify({"ok": True, "token": token})
 
 
+@app.route("/api/token/save", methods=["POST"])
+@login_required
+def save_token_manually():
+    """Salva token Deriv colado manualmente pelo usuário."""
+    data  = request.get_json(force=True) or {}
+    token = data.get("token", "").strip()
+    if not token:
+        return jsonify({"ok": False, "error": "Token vazio"}), 400
+    uid = session["user_id"]
+    with get_db() as conn:
+        conn.execute("UPDATE users SET deriv_token=? WHERE id=?", (token, uid))
+        conn.commit()
+    return jsonify({"ok": True})
+
+
 @app.route("/api/token/clear", methods=["POST"])
 @login_required
 def clear_saved_token():
