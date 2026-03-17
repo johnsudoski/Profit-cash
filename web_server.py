@@ -228,7 +228,7 @@ def calc_signal(prices: list, config: dict):
 #  Fix 2: buy usa ask_price da proposta (não o stake)
 #  Fix 3: logging detalhado para diagnóstico
 # ════════════════════════════════════════════════════════
-async def _deriv_bot_async(ss: SessionState, token: str, stake: float,
+async def _deriv_bot_async(ss: SessionState, token: str, valor_brl: float,
                             estrategia: str, want_demo: bool = False):
     try:
         import websockets
@@ -314,6 +314,33 @@ async def _deriv_bot_async(ss: SessionState, token: str, stake: float,
                 ss.log(f"💰 Saldo inicial: {saldo0:.2f} {currency}", "info")
                 ss.update_estado(saldo=saldo0, conectado=True)
                 _attempt = 0  # reset contador ao conectar com sucesso
+
+                # ── CONVERSÃO BRL → MOEDA DA CONTA ────────────────────────
+                if currency == "BRL":
+                    stake = valor_brl
+                else:
+                    req_ctr[0] += 1
+                    await dws.send(json.dumps({
+                        "exchange_rates": 1,
+                        "base_currency": "BRL",
+                        "req_id": req_ctr[0],
+                    }))
+                    try:
+                        raw_er = await asyncio.wait_for(dws.recv(), timeout=10)
+                        er_msg = json.loads(raw_er)
+                        rates  = (er_msg.get("exchange_rates") or {}).get("rates", {})
+                        rate   = float(rates.get(currency, 0))
+                        if rate > 0:
+                            stake = max(round(valor_brl * rate, 2), 0.35)
+                            ss.log(f"💱 R${valor_brl:.2f} → {currency} {stake:.2f} "
+                                   f"(1 BRL = {rate:.4f} {currency})", "info")
+                        else:
+                            raise ValueError("taxa não encontrada")
+                    except Exception:
+                        # Fallback: ~R$5,70 por USD
+                        stake = max(round(valor_brl / 5.7, 2), 0.35)
+                        ss.log(f"⚠️ Taxa BRL/{currency} indisponível — estimativa: "
+                               f"{currency} {stake:.2f}", "warn")
 
                 # ── SUBSCRIÇÕES ───────────────────────────────────────────
                 await dws.send(json.dumps({"balance": 1, "subscribe": 1}))
@@ -440,7 +467,7 @@ async def _deriv_bot_async(ss: SessionState, token: str, stake: float,
                         aname = ASSET_NAMES.get(info["asset"], info["asset"])
                         ss.trade(f"T{trade_count}", aname, info["direction"].lower(), stake)
                         ss.log(f"🛒 Comprando contrato: {info['direction']} {aname} "
-                               f"${stake:.2f} (ask: ${ask_price:.2f})", "info")
+                               f"R${valor_brl:.2f} (ask: {currency} {ask_price:.2f})", "info")
 
                         # FIX: usa ask_price, não stake (evita rejeição por preço incorreto)
                         await dws.send(json.dumps({
@@ -531,7 +558,7 @@ async def _deriv_bot_async(ss: SessionState, token: str, stake: float,
     ss.log("Robô desconectado.", "warn")
 
 
-def start_bot(ss: SessionState, token: str, stake: float,
+def start_bot(ss: SessionState, token: str, valor_brl: float,
               estrategia: str, want_demo: bool = False):
     if ss.estado_snap.get("rodando"):
         return
@@ -542,7 +569,7 @@ def start_bot(ss: SessionState, token: str, stake: float,
         asyncio.set_event_loop(loop)
         try:
             loop.run_until_complete(
-                _deriv_bot_async(ss, token, stake, estrategia, want_demo)
+                _deriv_bot_async(ss, token, valor_brl, estrategia, want_demo)
             )
         except Exception as e:
             ss.log(f"Robô encerrado: {e}", "warn")

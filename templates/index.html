@@ -405,10 +405,10 @@ html,body{
           </div>
           <!-- Entrada -->
           <div class="form-row">
-            <div class="form-icon">💵</div>
-            <label class="form-label" for="valor">Entrada</label>
+            <div class="form-icon">🇧🇷</div>
+            <label class="form-label" for="valor">Entrada (R$)</label>
             <input class="form-input" type="number" id="valor"
-              value="5" min="1" step="1" placeholder="5">
+              value="25" min="1" step="1" placeholder="25">
           </div>
         </div>
 
@@ -624,7 +624,7 @@ function renderHist() {
         <span class="trade-asset">${t.ativo}</span>
       </div>
       <div style="text-align:right">
-        ${t.valor ? `<div class="trade-amount">$ ${t.valor.toFixed(2)}</div>` : ''}
+        ${t.valor ? `<div class="trade-amount">R$ ${t.valor.toFixed(2)}</div>` : ''}
         <div class="trade-result ${t.resultado === 'W' ? 'win' : t.resultado === 'L' ? 'loss' : 'pending'}">
           ${t.resultado === 'W' ? '✓ WIN' : t.resultado === 'L' ? '✗ LOSS' : '● '}
         </div>
