@@ -403,6 +403,20 @@ html,body{
               ✓ Salvo
             </div>
           </div>
+          <!-- Botão Conectar Deriv (OAuth) — aparece se app_id configurado -->
+          <div id="oauthRow" style="display:none;margin-top:8px">
+            <a id="oauthBtn" href="/oauth/deriv"
+               style="display:flex;align-items:center;justify-content:center;gap:8px;
+                      background:linear-gradient(135deg,#e31c5f,#f30b0b);
+                      color:#fff;font-size:14px;font-weight:600;border-radius:12px;
+                      padding:12px 16px;text-decoration:none;width:100%;box-sizing:border-box">
+              <span style="font-size:20px">🔗</span>
+              Conectar conta Deriv automaticamente
+            </a>
+            <p style="font-size:11px;color:rgba(235,235,245,0.45);text-align:center;margin-top:6px">
+              Autorize uma vez — token preenchido automaticamente sempre que entrar
+            </p>
+          </div>
           <!-- Entrada -->
           <div class="form-row">
             <div class="form-icon">🇧🇷</div>
@@ -503,6 +517,38 @@ async function loadSavedToken() {
     }
   } catch (e) {
     // silencioso
+  }
+}
+
+// ── Verifica se OAuth está disponível e exibe/oculta botão ─────────────────
+async function checkOAuthAvailability() {
+  try {
+    const r = await fetch(`${API}/api/oauth/status`);
+    const d = await r.json();
+    if (d.available) {
+      el('oauthRow').style.display = 'block';
+    }
+  } catch (e) {}
+}
+
+// ── Trata retorno do OAuth (parâmetros na URL) ─────────────────────────────
+function handleOAuthReturn() {
+  const params = new URLSearchParams(window.location.search);
+  const status = params.get('oauth');
+  if (!status) return;
+
+  // Limpa o parâmetro da URL sem reload
+  const clean = window.location.pathname;
+  window.history.replaceState({}, '', clean);
+
+  if (status === 'success') {
+    toast('✅ Conta Deriv conectada! Token salvo automaticamente.');
+    // Recarrega o token (já foi salvo no callback)
+    loadSavedToken();
+  } else if (status === 'error') {
+    toast('❌ Falha ao conectar conta Deriv. Tente novamente.');
+  } else if (status === 'no_app_id') {
+    toast('⚙️ DERIV_APP_ID não configurado no servidor.');
   }
 }
 
@@ -722,7 +768,9 @@ function switchTab(name, btn) {
 
 // ── Init ──────────────────────────────────────────────────────────────────────
 connectWS();
-loadSavedToken();  // Busca token salvo automaticamente
+loadSavedToken();         // Busca token salvo automaticamente
+checkOAuthAvailability(); // Exibe botão "Conectar Deriv" se configurado
+handleOAuthReturn();      // Trata ?oauth=success/error vindo do callback
 </script>
 
 </body>

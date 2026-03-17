@@ -13,7 +13,10 @@ app  = Flask(__name__, template_folder="templates")
 app.secret_key = os.environ.get("SECRET_KEY", uuid.uuid4().hex)
 sock = Sock(app)
 
-DERIV_WS = "wss://ws.binaryws.com/websockets/v3?app_id=1089"
+# Deriv OAuth — configure DERIV_APP_ID no Railway (env var)
+# Cadastro gratuito em: https://api.deriv.com/ → Register app
+DERIV_APP_ID = os.environ.get("DERIV_APP_ID", "")
+DERIV_WS     = f"wss://ws.binaryws.com/websockets/v3?app_id={DERIV_APP_ID or '1089'}"
 
 ASSETS = ["R_75", "R_100", "R_50", "R_25", "R_10"]
 ASSET_NAMES = {
@@ -687,6 +690,62 @@ def clear_saved_token():
         conn.execute("UPDATE users SET deriv_token='' WHERE id=?", (uid,))
         conn.commit()
     return jsonify({"ok": True})
+
+
+# ════════════════════════════════════════════════════════
+#  ROTAS — OAUTH DERIV
+# ════════════════════════════════════════════════════════
+@app.route("/oauth/deriv")
+@login_required
+def oauth_deriv_start():
+    """Inicia o fluxo OAuth da Deriv."""
+    if not DERIV_APP_ID:
+        return redirect("/?oauth=no_app_id")
+    # Monta redirect_uri dinamicamente com base no host atual
+    redirect_uri = request.url_root.rstrip("/") + "/oauth/callback"
+    oauth_url = (
+        f"https://oauth.deriv.com/oauth2/authorize"
+        f"?app_id={DERIV_APP_ID}&l=pt&brand=deriv"
+        f"&redirect_uri={redirect_uri}"
+    )
+    return redirect(oauth_url)
+
+
+@app.route("/oauth/callback")
+@login_required
+def oauth_deriv_callback():
+    """Recebe o callback OAuth da Deriv, salva os tokens e redireciona."""
+    # Deriv envia: ?acct1=CR...&token1=a1-...&cur1=USD&acct2=VRTC...&token2=a1-...&cur2=USD
+    real_token  = None
+    demo_token  = None
+    i = 1
+    while request.args.get(f"token{i}"):
+        acct  = request.args.get(f"acct{i}", "")
+        token = request.args.get(f"token{i}", "")
+        # Contas virtuais começam com "VRTC" ou "VR"
+        is_virtual = acct.upper().startswith(("VR", "VRTC"))
+        if is_virtual and not demo_token:
+            demo_token = token
+        elif not is_virtual and not real_token:
+            real_token = token
+        i += 1
+
+    token_to_save = real_token or demo_token
+    if not token_to_save:
+        return redirect("/?oauth=error")
+
+    uid = session["user_id"]
+    with get_db() as conn:
+        conn.execute("UPDATE users SET deriv_token=? WHERE id=?", (token_to_save, uid))
+        conn.commit()
+    return redirect("/?oauth=success")
+
+
+@app.route("/api/oauth/status")
+@login_required
+def oauth_status():
+    """Informa ao frontend se OAuth Deriv está disponível."""
+    return jsonify({"available": bool(DERIV_APP_ID)})
 
 
 # ════════════════════════════════════════════════════════
