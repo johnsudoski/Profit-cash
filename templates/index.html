@@ -374,9 +374,61 @@ html,body{
   </div>
 </nav>
 
+<!-- ════════════════════════════════════════════
+     PAYWALL — só aparece se assinatura inativa
+     e TICTO_MODE=strict
+════════════════════════════════════════════ -->
+{% if not sub_allowed %}
+<div style="
+  position:fixed;inset:0;z-index:9999;
+  background:var(--bg);
+  display:flex;flex-direction:column;
+  align-items:center;justify-content:center;
+  padding:32px;text-align:center;
+  gap:16px;
+">
+  <div style="font-size:56px;line-height:1">🔒</div>
+  <div style="font-size:22px;font-weight:700;color:var(--lbl)">Acesso Restrito</div>
+  {% if sub_reason == 'expired' %}
+  <div style="font-size:15px;color:var(--lbl2);max-width:320px;line-height:1.5">
+    Sua assinatura expirou. Renove o acesso ao curso para continuar usando o robô.
+  </div>
+  {% else %}
+  <div style="font-size:15px;color:var(--lbl2);max-width:320px;line-height:1.5">
+    O Profit Cash é exclusivo para alunos do curso.<br>
+    Adquira o acesso e libere o robô imediatamente.
+  </div>
+  {% endif %}
+  <a href="{{ course_url }}" target="_blank" style="
+    margin-top:8px;
+    display:inline-flex;align-items:center;gap:8px;
+    background:linear-gradient(135deg,#30D158,#25a348);
+    color:#fff;font-weight:700;font-size:16px;
+    padding:16px 32px;border-radius:var(--r-full);
+    text-decoration:none;box-shadow:0 4px 20px rgba(48,209,88,.35);
+  ">
+    🚀 Quero acesso ao curso
+  </a>
+  <a href="/logout" style="font-size:13px;color:var(--lbl3);text-decoration:none;margin-top:4px">
+    Sair da conta
+  </a>
+</div>
+{% endif %}
+
 <!-- PAGE -->
 <div class="page">
 <div class="container">
+
+  {% if sub_allowed and sub_expires and ticto_mode == 'strict' %}
+  <div style="
+    margin:12px 0 0;padding:8px 14px;
+    background:rgba(48,209,88,.10);border:0.5px solid rgba(48,209,88,.25);
+    border-radius:var(--r);display:flex;align-items:center;gap:8px;
+    font-size:12px;color:var(--green);font-weight:500;
+  ">
+    ✅ Acesso ativo até {{ sub_expires[:10] }}
+  </div>
+  {% endif %}
 
   <div class="mt16 gap16 two-col" id="layout">
 

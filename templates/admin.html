@@ -149,6 +149,10 @@ html,body{
       <div class="stat-lbl">Ativos</div>
     </div>
     <div class="stat">
+      <div class="stat-val" style="color:var(--yellow)">{{ users|selectattr('ticto_authorized','equalto',1)|list|length }}</div>
+      <div class="stat-lbl">Com assinatura</div>
+    </div>
+    <div class="stat">
       <div class="stat-val" style="color:var(--yellow)">{{ users|selectattr('is_admin','equalto',1)|list|length }}</div>
       <div class="stat-lbl">Admins</div>
     </div>
@@ -179,16 +183,35 @@ html,body{
               id="badge-{{ user.id }}">
           {{ 'ATIVO' if user.is_active else 'INATIVO' }}
         </span>
+        {% if user.ticto_authorized %}
+        <span class="badge" style="background:rgba(48,209,88,.15);color:var(--green);"
+              title="Expira: {{ user.ticto_expires_at or '—' }}">
+          ✅ ASSINANTE
+        </span>
+        {% else %}
+        <span class="badge badge-inactive">SEM ACESSO</span>
+        {% endif %}
       </div>
       {% if user.id != me %}
       <div class="actions">
+        {% if user.ticto_authorized %}
+        <button class="action-btn" style="background:rgba(255,69,58,.12);color:var(--red)"
+                onclick="deauthorize({{ user.id }})">
+          🔒 Revogar
+        </button>
+        {% else %}
+        <button class="action-btn" style="background:rgba(48,209,88,.12);color:var(--green)"
+                onclick="authorize({{ user.id }})">
+          🔓 Liberar acesso
+        </button>
+        {% endif %}
         <button class="action-btn btn-toggle"
                 onclick="toggleUser({{ user.id }})">
           {{ '🔴 Desativar' if user.is_active else '🟢 Ativar' }}
         </button>
         <button class="action-btn btn-admin"
                 onclick="toggleAdmin({{ user.id }})">
-          {{ '👤 Remover admin' if user.is_admin else '⭐ Tornar admin' }}
+          {{ '👤 Rem. admin' if user.is_admin else '⭐ Admin' }}
         </button>
         <button class="action-btn btn-delete"
                 onclick="deleteUser({{ user.id }}, '{{ user.username }}')">
@@ -226,6 +249,29 @@ async function deleteUser(id, name) {
   if (!d.ok) { toast(d.error); return; }
   document.getElementById('row-'+id)?.remove();
   toast('Usuário removido');
+}
+
+async function authorize(id) {
+  const days = prompt('Quantos dias de acesso? (padrão: 180)', '180');
+  if (days === null) return;
+  const r = await fetch(`/admin/authorize/${id}`, {
+    method:'POST',
+    headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({days: parseInt(days)||180})
+  });
+  const d = await r.json();
+  if (!d.ok) { toast(d.error||'Erro'); return; }
+  toast(`✅ Acesso liberado até ${(d.expires_at||'').slice(0,10)}`);
+  setTimeout(()=>location.reload(), 1200);
+}
+
+async function deauthorize(id) {
+  if (!confirm('Revogar acesso deste usuário?')) return;
+  const r = await fetch(`/admin/deauthorize/${id}`, {method:'POST'});
+  const d = await r.json();
+  if (!d.ok) { toast(d.error||'Erro'); return; }
+  toast('🔒 Acesso revogado');
+  setTimeout(()=>location.reload(), 1000);
 }
 
 function toast(msg, dur=2800) {

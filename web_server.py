@@ -1,7 +1,8 @@
 """
 Profit Cash — Servidor Web (Deriv API + Multi-User Auth)
 """
-import asyncio, json, os, sqlite3, sys, threading, time, uuid, math
+import asyncio, json, os, sqlite3, sys, threading, time, uuid, math, hashlib, hmac
+from datetime import datetime, timedelta
 from functools import wraps
 from flask import (Flask, render_template, jsonify, request,
                    session, redirect, url_for)
@@ -14,9 +15,17 @@ app.secret_key = os.environ.get("SECRET_KEY", uuid.uuid4().hex)
 sock = Sock(app)
 
 # Deriv OAuth — configure DERIV_APP_ID no Railway (env var)
-# Cadastro gratuito em: https://api.deriv.com/ → Register app
 DERIV_APP_ID = os.environ.get("DERIV_APP_ID", "")
 DERIV_WS     = f"wss://ws.binaryws.com/websockets/v3?app_id={DERIV_APP_ID or '1089'}"
+
+# ── Ticto / Assinatura ───────────────────────────────────────────────────────
+# TICTO_MODE=open  → todos têm acesso (desenvolvimento / testes)
+# TICTO_MODE=strict → só quem comprou na Ticto tem acesso
+TICTO_MODE           = os.environ.get("TICTO_MODE", "open")
+TICTO_WEBHOOK_SECRET = os.environ.get("TICTO_WEBHOOK_SECRET", "")   # chave de postback da Ticto
+TICTO_PRODUCT_ID     = os.environ.get("TICTO_PRODUCT_ID", "")        # filtrar produto específico (opcional)
+TICTO_COURSE_URL     = os.environ.get("TICTO_COURSE_URL", "")         # link de compra do curso
+TICTO_DAYS           = int(os.environ.get("TICTO_DAYS", "180"))       # dias de acesso por compra (padrão 6 meses)
 
 ASSETS = ["R_75", "R_100", "R_50", "R_25", "R_10"]
 ASSET_NAMES = {
@@ -59,11 +68,17 @@ def init_db():
                 created_at    TEXT DEFAULT CURRENT_TIMESTAMP
             )
         """)
-        # Migração para bancos antigos sem deriv_token
-        try:
-            conn.execute("ALTER TABLE users ADD COLUMN deriv_token TEXT DEFAULT ''")
-        except sqlite3.OperationalError:
-            pass  # Coluna já existe
+        # Migrações para bancos antigos (novas colunas adicionadas ao longo do tempo)
+        for migration in [
+            "ALTER TABLE users ADD COLUMN deriv_token         TEXT    DEFAULT ''",
+            "ALTER TABLE users ADD COLUMN ticto_authorized    INTEGER DEFAULT 0",
+            "ALTER TABLE users ADD COLUMN ticto_expires_at    TEXT",
+            "ALTER TABLE users ADD COLUMN ticto_transaction_id TEXT",
+        ]:
+            try:
+                conn.execute(migration)
+            except sqlite3.OperationalError:
+                pass  # coluna já existe
         conn.commit()
 
     # Criar admin a partir de variáveis de ambiente
@@ -102,6 +117,55 @@ def admin_required(f):
             return redirect("/login")
         if not session.get("is_admin"):
             return "Acesso negado", 403
+        return f(*args, **kwargs)
+    return decorated
+
+
+# ════════════════════════════════════════════════════════
+#  CONTROLE DE ASSINATURA (TICTO)
+# ════════════════════════════════════════════════════════
+def check_subscription(user_id: int, is_admin: bool = False) -> tuple[bool, str]:
+    """
+    Retorna (permitido, motivo).
+    motivo: 'open' | 'admin' | 'ok' | 'not_authorized' | 'expired'
+    """
+    if TICTO_MODE != "strict":
+        return True, "open"
+    if is_admin:
+        return True, "admin"
+    with get_db() as conn:
+        row = conn.execute(
+            "SELECT ticto_authorized, ticto_expires_at FROM users WHERE id=?",
+            (user_id,)
+        ).fetchone()
+    if not row or not row["ticto_authorized"]:
+        return False, "not_authorized"
+    if row["ticto_expires_at"]:
+        try:
+            expiry = datetime.fromisoformat(row["ticto_expires_at"])
+            if expiry < datetime.utcnow():
+                return False, "expired"
+        except ValueError:
+            pass
+    return True, "ok"
+
+
+def subscription_required(f):
+    """Decorator: bloqueia rota se usuário não tiver assinatura ativa."""
+    @wraps(f)
+    def decorated(*args, **kwargs):
+        if "user_id" not in session:
+            return jsonify({"ok": False, "error": "Login necessário"}), 401
+        allowed, reason = check_subscription(
+            session["user_id"], session.get("is_admin", False)
+        )
+        if not allowed:
+            return jsonify({
+                "ok": False,
+                "error": "subscription_required",
+                "reason": reason,
+                "course_url": TICTO_COURSE_URL,
+            }), 403
         return f(*args, **kwargs)
     return decorated
 
@@ -249,8 +313,9 @@ async def _deriv_bot_async(ss: SessionState, token: str, valor_brl: float,
     req_ctr     = [0]  # inteiro mutable via lista (closure)
     trade_count = 0
     currency    = "USD"
+    rate_brl    = 5.70  # taxa BRL→moeda da conta (atualizada após autenticação)
     last_status = [time.time()]
-    poc_subscribed = [False]  # subscrição global de contratos (enviada uma vez)
+    pending_buy = {}   # buy_rid -> {direction, asset, expected_payout}
 
     ss.log("Conectando à Deriv…", "info")
     ss.update_estado(rodando=True)
@@ -324,7 +389,8 @@ async def _deriv_bot_async(ss: SessionState, token: str, valor_brl: float,
                 _BRL_PER = {"USD": 5.70, "EUR": 6.20, "GBP": 7.20,
                             "AUD": 3.70, "CAD": 4.10, "CHF": 6.40}
                 if currency == "BRL":
-                    stake = valor_brl
+                    rate_brl = 1.0
+                    stake    = valor_brl
                 else:
                     rate_brl = _BRL_PER.get(currency, 5.70)
                     stake    = max(round(valor_brl / rate_brl, 2), 0.35)
@@ -367,8 +433,40 @@ async def _deriv_bot_async(ss: SessionState, token: str, valor_brl: float,
                     except asyncio.TimeoutError:
                         if ss.stop_evt.is_set(): break
                         await dws.send(json.dumps({"ping": 1}))
-                        # Status periódico a cada 60s
                         now = time.time()
+                        # ── Liquidar contratos expirados por preço ──────────
+                        for cid in list(active_cx.keys()):
+                            info = active_cx.get(cid)
+                            if not info or now < info.get("expires_at", float("inf")):
+                                continue
+                            asset_cx    = info["asset"]
+                            direction_cx= info["direction"]
+                            entry_price = info["entry_price"]
+                            bp          = info["buy_price"]
+                            tid         = info["tid"]
+                            payout_est  = info.get("expected_payout", bp * 1.85)
+                            ticks       = tick_buf.get(asset_cx, [])
+                            if not ticks:
+                                continue  # sem ticks, aguardar
+                            exit_price = ticks[-1]
+                            won = (exit_price > entry_price if direction_cx == "CALL"
+                                   else exit_price < entry_price)
+                            active_cx.pop(cid)
+                            if won:
+                                profit       = payout_est - bp
+                                wins        += 1
+                                lucro_total += profit
+                                profit_brl   = profit * rate_brl
+                                ss.log(f"✅ WIN  +R${profit_brl:.2f} | {direction_cx} {entry_price:.5g}→{exit_price:.5g}", "win")
+                                ss.resultado(tid, "W", profit)
+                            else:
+                                losses      += 1
+                                lucro_total -= bp
+                                loss_brl     = bp * rate_brl
+                                ss.log(f"❌ LOSS −R${loss_brl:.2f} | {direction_cx} {entry_price:.5g}→{exit_price:.5g}", "loss")
+                                ss.resultado(tid, "L", -bp)
+                            ss.update_estado(wins=wins, losses=losses, lucro=lucro_total)
+                        # Status periódico a cada 60s
                         if now - last_status[0] > 60:
                             last_status[0] = now
                             counts = {a: len(tick_buf[a]) for a in ASSETS}
@@ -440,9 +538,10 @@ async def _deriv_bot_async(ss: SessionState, token: str, valor_brl: float,
                             ss.log(f"⚠️ Proposta recusada (req#{rid}): {err_msg}", "warn")
                             continue
 
-                        prop      = msg.get("proposal") or {}
-                        pid       = prop.get("id", "")
-                        ask_price = float(prop.get("ask_price", stake))  # Preço real da Deriv
+                        prop             = msg.get("proposal") or {}
+                        pid              = prop.get("id", "")
+                        ask_price        = float(prop.get("ask_price", stake))
+                        expected_payout  = float(prop.get("payout", ask_price * 1.85))
 
                         if not pid:
                             ss.log("⚠️ Proposta sem ID recebida", "warn")
@@ -450,14 +549,20 @@ async def _deriv_bot_async(ss: SessionState, token: str, valor_brl: float,
 
                         trade_count += 1
                         req_ctr[0] += 1
-                        buy_rid = req_ctr[0]  # Inteiro para o buy também
+                        buy_rid = req_ctr[0]
+
+                        # Guardar contexto para associar ao buy confirmado
+                        pending_buy[buy_rid] = {
+                            "direction":       info["direction"],
+                            "asset":           info["asset"],
+                            "expected_payout": expected_payout,
+                        }
 
                         aname = ASSET_NAMES.get(info["asset"], info["asset"])
                         ss.trade(f"T{trade_count}", aname, info["direction"].lower(), stake)
                         ss.log(f"🛒 Comprando contrato: {info['direction']} {aname} "
                                f"R${valor_brl:.2f} (ask: {currency} {ask_price:.2f})", "info")
 
-                        # FIX: usa ask_price, não stake (evita rejeição por preço incorreto)
                         await dws.send(json.dumps({
                             "buy":    pid,
                             "req_id": buy_rid,
@@ -477,54 +582,30 @@ async def _deriv_bot_async(ss: SessionState, token: str, valor_brl: float,
                                 ss.log("→ Mercado fechado ou fora de horário", "warn")
                             continue
 
-                        bd  = msg.get("buy", {})
-                        cid = str(bd.get("contract_id", ""))
-                        bp  = float(bd.get("buy_price", stake))
+                        bd      = msg.get("buy", {})
+                        cid     = str(bd.get("contract_id", ""))
+                        bp      = float(bd.get("buy_price", stake))
+                        buy_rid = msg.get("req_id")
+                        binfo   = pending_buy.pop(buy_rid, {})
 
                         if cid:
+                            asset_cx    = binfo.get("asset", "")
+                            direction_cx= binfo.get("direction", "CALL")
+                            payout_cx   = binfo.get("expected_payout", bp * 1.85)
+                            entry_price = tick_buf.get(asset_cx, [0])[-1] if tick_buf.get(asset_cx) else 0
+                            expires_at  = time.time() + config["duracao"] * 60 + 20
                             tid = f"T{trade_count}"
-                            active_cx[cid] = {"tid": tid, "buy_price": bp}
-                            ss.log(f"✅ Contrato #{cid} aberto — R${valor_brl:.2f}", "win")
-                            # Subscrição global enviada UMA vez (contract_id não é parâmetro válido)
-                            if not poc_subscribed[0]:
-                                req_ctr[0] += 1
-                                await dws.send(json.dumps({
-                                    "proposal_open_contracts": 1,
-                                    "subscribe": 1,
-                                    "req_id": req_ctr[0],
-                                }))
-                                poc_subscribed[0] = True
+                            active_cx[cid] = {
+                                "tid": tid, "buy_price": bp,
+                                "expires_at": expires_at,
+                                "asset": asset_cx, "direction": direction_cx,
+                                "entry_price": entry_price,
+                                "expected_payout": payout_cx,
+                            }
+                            ss.log(f"✅ Contrato #{cid} aberto — R${valor_brl:.2f} "
+                                   f"({direction_cx} @ {entry_price:.5g})", "win")
                         continue
 
-                    # ── RESULTADO DO CONTRATO ──────────────────────────────
-                    if mtype == "proposal_open_contracts":
-                        poc  = msg.get("proposal_open_contracts", {})
-                        cid  = str(poc.get("contract_id", ""))
-                        stat = poc.get("status", "")
-
-                        if not cid or cid not in active_cx:
-                            continue
-                        if stat not in ("won", "lost", "sold"):
-                            continue  # Contrato ainda aberto
-
-                        info   = active_cx.pop(cid)
-                        profit = float(poc.get("profit", 0))
-                        bp     = info["buy_price"]
-                        tid    = info["tid"]
-
-                        if stat == "won":
-                            wins        += 1
-                            lucro_total += profit
-                            ss.log(f"✅ WIN  +${profit:.2f} | Total: ${lucro_total:+.2f}", "win")
-                            ss.resultado(tid, "W", profit)
-                        else:
-                            losses      += 1
-                            lucro_total -= bp
-                            ss.log(f"❌ LOSS −${bp:.2f} | Total: ${lucro_total:+.2f}", "loss")
-                            ss.resultado(tid, "L", -bp)
-
-                        ss.update_estado(wins=wins, losses=losses, lucro=lucro_total)
-                        continue
 
         except websockets.exceptions.ConnectionClosed as e:
             if ss.stop_evt.is_set():
@@ -750,6 +831,113 @@ def oauth_status():
 
 
 # ════════════════════════════════════════════════════════
+#  ROTAS — WEBHOOK TICTO (recebe notificações de compra)
+# ════════════════════════════════════════════════════════
+@app.route("/webhook/ticto", methods=["POST"])
+def ticto_webhook():
+    """
+    Endpoint que a Ticto chama quando alguém compra o curso.
+    Configure no painel da Ticto → Produto → Configurações → Postback URL.
+    Coloque a mesma chave em TICTO_WEBHOOK_SECRET no Railway.
+    """
+    payload = request.get_json(force=True) or request.form.to_dict() or {}
+
+    # ── Validar token de segurança ────────────────────────────────────────────
+    if TICTO_WEBHOOK_SECRET:
+        token_recv = (payload.get("token") or payload.get("chave") or
+                      request.headers.get("X-Ticto-Token", ""))
+        if token_recv != TICTO_WEBHOOK_SECRET:
+            print(f"[TICTO] Token inválido recebido: {token_recv[:20]}…", flush=True)
+            return jsonify({"ok": False, "error": "token_invalido"}), 403
+
+    # ── Extrair dados do pedido (Ticto pode variar o formato) ─────────────────
+    tx      = payload.get("transaction") or payload.get("data") or payload
+    buyer   = tx.get("buyer") or tx.get("customer") or tx.get("aluno") or {}
+    email   = (buyer.get("email") or tx.get("email") or payload.get("email") or "").strip().lower()
+    name    = buyer.get("name") or buyer.get("nome") or email.split("@")[0]
+    tx_id   = str(tx.get("id") or tx.get("transaction_id") or payload.get("id") or "")
+    event   = (payload.get("event") or payload.get("status") or "approved").lower()
+    product = (tx.get("product") or tx.get("produto") or {})
+    prod_id = str(product.get("id") or tx.get("product_id") or "")
+
+    if not email:
+        return jsonify({"ok": False, "error": "email_nao_encontrado"}), 400
+
+    # ── Filtrar por produto (opcional) ───────────────────────────────────────
+    if TICTO_PRODUCT_ID and prod_id and prod_id != TICTO_PRODUCT_ID:
+        return jsonify({"ok": True, "msg": "produto_ignorado"}), 200
+
+    # ── Classificar tipo de evento ────────────────────────────────────────────
+    is_active   = any(s in event for s in ["approv", "ativ", "creat", "paid", "pago", "complet"])
+    is_cancelled= any(s in event for s in ["cancel", "refund", "chargeback", "estorno"])
+
+    # ── Data de expiração ─────────────────────────────────────────────────────
+    sub_data   = tx.get("subscription") or tx.get("assinatura") or {}
+    raw_expiry = sub_data.get("expires_at") or sub_data.get("expira_em") or ""
+    if raw_expiry:
+        try:
+            expires_at = datetime.fromisoformat(raw_expiry.replace(" ", "T"))
+        except ValueError:
+            expires_at = datetime.utcnow() + timedelta(days=TICTO_DAYS)
+    else:
+        expires_at = datetime.utcnow() + timedelta(days=TICTO_DAYS)
+
+    # ── Aplicar no banco ──────────────────────────────────────────────────────
+    with get_db() as conn:
+        user = conn.execute("SELECT id FROM users WHERE email=?", (email,)).fetchone()
+
+        if not user:
+            # Criar conta pendente — usuário define senha no primeiro login
+            import secrets as _sec
+            tmp_hash = generate_password_hash(_sec.token_hex(16))
+            uname = (name[:20] if name else email.split("@")[0][:20]).replace(" ", "_")
+            conn.execute(
+                "INSERT OR IGNORE INTO users (username, email, password_hash) VALUES (?,?,?)",
+                (uname, email, tmp_hash)
+            )
+            conn.commit()
+            user = conn.execute("SELECT id FROM users WHERE email=?", (email,)).fetchone()
+
+        uid = user["id"]
+        if is_cancelled:
+            conn.execute("UPDATE users SET ticto_authorized=0 WHERE id=?", (uid,))
+            print(f"[TICTO] ❌ Acesso revogado: {email}", flush=True)
+        elif is_active:
+            conn.execute(
+                """UPDATE users SET ticto_authorized=1,
+                   ticto_expires_at=?, ticto_transaction_id=? WHERE id=?""",
+                (expires_at.isoformat(), tx_id, uid)
+            )
+            print(f"[TICTO] ✅ Acesso liberado: {email} até {expires_at.date()}", flush=True)
+        conn.commit()
+
+    return jsonify({"ok": True, "email": email, "event": event}), 200
+
+
+# ════════════════════════════════════════════════════════
+#  ROTAS — STATUS DE ASSINATURA (frontend)
+# ════════════════════════════════════════════════════════
+@app.route("/api/subscription")
+@login_required
+def api_subscription():
+    uid      = session["user_id"]
+    is_admin = session.get("is_admin", False)
+    allowed, reason = check_subscription(uid, is_admin)
+    with get_db() as conn:
+        row = conn.execute(
+            "SELECT ticto_authorized, ticto_expires_at FROM users WHERE id=?", (uid,)
+        ).fetchone()
+    return jsonify({
+        "ok":         True,
+        "allowed":    allowed,
+        "reason":     reason,
+        "expires_at": (row["ticto_expires_at"] if row else None),
+        "mode":       TICTO_MODE,
+        "course_url": TICTO_COURSE_URL,
+    })
+
+
+# ════════════════════════════════════════════════════════
 #  ROTAS — ADMIN
 # ════════════════════════════════════════════════════════
 @app.route("/admin")
@@ -797,6 +985,35 @@ def delete_user(user_id):
     return jsonify({"ok": True})
 
 
+@app.route("/admin/authorize/<int:user_id>", methods=["POST"])
+@admin_required
+def admin_authorize(user_id):
+    """Autoriza manualmente (sem precisar da Ticto). Útil para testes ou cortesias."""
+    data    = request.get_json(force=True) or {}
+    days    = int(data.get("days", TICTO_DAYS))
+    expires = (datetime.utcnow() + timedelta(days=days)).isoformat()
+    with get_db() as conn:
+        conn.execute(
+            "UPDATE users SET ticto_authorized=1, ticto_expires_at=?, ticto_transaction_id='admin' WHERE id=?",
+            (expires, user_id)
+        )
+        conn.commit()
+    return jsonify({"ok": True, "expires_at": expires})
+
+
+@app.route("/admin/deauthorize/<int:user_id>", methods=["POST"])
+@admin_required
+def admin_deauthorize(user_id):
+    """Revoga acesso manualmente."""
+    with get_db() as conn:
+        conn.execute(
+            "UPDATE users SET ticto_authorized=0, ticto_expires_at=NULL WHERE id=?",
+            (user_id,)
+        )
+        conn.commit()
+    return jsonify({"ok": True})
+
+
 # ════════════════════════════════════════════════════════
 #  ROTAS — APLICAÇÃO PRINCIPAL
 # ════════════════════════════════════════════════════════
@@ -805,9 +1022,22 @@ def delete_user(user_id):
 def index():
     if "sid" not in session:
         session["sid"] = uuid.uuid4().hex
+    uid      = session["user_id"]
+    is_admin = session.get("is_admin", False)
+    allowed, reason = check_subscription(uid, is_admin)
+    with get_db() as conn:
+        row = conn.execute(
+            "SELECT ticto_expires_at FROM users WHERE id=?", (uid,)
+        ).fetchone()
+    expires_at = (row["ticto_expires_at"] if row else None) or ""
     return render_template("index.html",
                            username=session.get("username", ""),
-                           is_admin=session.get("is_admin", False))
+                           is_admin=is_admin,
+                           sub_allowed=allowed,
+                           sub_reason=reason,
+                           sub_expires=expires_at,
+                           course_url=TICTO_COURSE_URL or "#",
+                           ticto_mode=TICTO_MODE)
 
 
 @app.route("/manifest.json")
@@ -825,6 +1055,7 @@ def api_estado():
 
 @app.route("/api/start", methods=["POST"])
 @login_required
+@subscription_required
 def api_start():
     data = request.get_json(force=True) or {}
 
