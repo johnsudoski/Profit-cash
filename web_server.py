@@ -42,7 +42,7 @@ TICTO_MODE           = os.environ.get("TICTO_MODE", "open")
 TICTO_WEBHOOK_SECRET = os.environ.get("TICTO_WEBHOOK_SECRET", "")   # chave de postback da Ticto
 TICTO_PRODUCT_ID     = os.environ.get("TICTO_PRODUCT_ID", "")        # filtrar produto específico (opcional)
 TICTO_COURSE_URL     = os.environ.get("TICTO_COURSE_URL", "")         # link de compra do curso
-TICTO_DAYS           = int(os.environ.get("TICTO_DAYS", "180"))       # dias de acesso por compra (padrão 6 meses)
+TICTO_DAYS           = int("".join(c for c in os.environ.get("TICTO_DAYS", "180") if c.isdigit()) or "180")
 
 ASSETS = ["R_75", "R_100", "R_50", "R_25", "R_10"]
 ASSET_NAMES = {
