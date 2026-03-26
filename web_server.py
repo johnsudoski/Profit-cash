@@ -11,7 +11,24 @@ from werkzeug.security import generate_password_hash, check_password_hash
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 app  = Flask(__name__, template_folder="templates")
-app.secret_key = os.environ.get("SECRET_KEY", uuid.uuid4().hex)
+
+# SECRET_KEY fixo é obrigatório para sessions persistirem entre restarts.
+# No Railway, defina SECRET_KEY como variável de ambiente (qualquer string longa).
+_raw_key = os.environ.get("SECRET_KEY", "")
+if not _raw_key:
+    # Fallback: gera e persiste em arquivo local (funciona em dev/Railway com volume)
+    _key_file = os.path.join(BASE_DIR, ".secret_key")
+    if os.path.exists(_key_file):
+        _raw_key = open(_key_file).read().strip()
+    else:
+        _raw_key = uuid.uuid4().hex + uuid.uuid4().hex
+        try:
+            open(_key_file, "w").write(_raw_key)
+        except Exception:
+            pass
+app.secret_key = _raw_key or uuid.uuid4().hex
+app.permanent_session_lifetime = timedelta(days=60)  # sessão dura 60 dias sem logout
+
 sock = Sock(app)
 
 # Deriv OAuth — configure DERIV_APP_ID no Railway (env var)
@@ -81,16 +98,44 @@ def init_db():
                 pass  # coluna já existe
         conn.commit()
 
-    # Criar admin a partir de variáveis de ambiente
+    # ── Admin principal (fixo) ───────────────────────────────────────────────
+    # Credenciais do dono do sistema — sempre garante acesso admin
+    _OWNER_EMAIL = "joaoedaltonsudou@gmail.com"
+    _OWNER_PASS  = os.environ.get("OWNER_PASSWORD", "@Salugo10!")
+    _OWNER_USER  = "joao"
+    try:
+        with get_db() as conn:
+            exists = conn.execute(
+                "SELECT id FROM users WHERE email=?", (_OWNER_EMAIL,)
+            ).fetchone()
+            if not exists:
+                conn.execute(
+                    "INSERT INTO users (username,email,password_hash,is_admin,is_active,"
+                    "ticto_authorized) VALUES (?,?,?,1,1,1)",
+                    (_OWNER_USER, _OWNER_EMAIL, generate_password_hash(_OWNER_PASS))
+                )
+            else:
+                # Garantir que sempre seja admin e ativo, mesmo se alterado
+                conn.execute(
+                    "UPDATE users SET is_admin=1, is_active=1, ticto_authorized=1 WHERE email=?",
+                    (_OWNER_EMAIL,)
+                )
+            conn.commit()
+    except Exception as e:
+        print(f"[INIT] Aviso ao criar owner: {e}", flush=True)
+
+    # ── Admin via variáveis de ambiente (opcional, para outros admins) ────────
     admin_user = os.environ.get("ADMIN_USERNAME", "")
     admin_pass = os.environ.get("ADMIN_PASSWORD", "")
+    admin_email= os.environ.get("ADMIN_EMAIL", "")
     if admin_user and admin_pass:
         try:
             with get_db() as conn:
                 conn.execute(
                     "INSERT OR IGNORE INTO users "
-                    "(username, email, password_hash, is_admin) VALUES (?,?,?,1)",
-                    (admin_user, f"{admin_user}@admin.local",
+                    "(username, email, password_hash, is_admin, ticto_authorized) VALUES (?,?,?,1,1)",
+                    (admin_user,
+                     admin_email or f"{admin_user}@admin.local",
                      generate_password_hash(admin_pass))
                 )
                 conn.commit()
@@ -698,6 +743,7 @@ def login():
                             user = conn.execute(
                                 "SELECT * FROM users WHERE email=?", (email,)
                             ).fetchone()
+                        session.permanent  = True
                         session["user_id"]  = user["id"]
                         session["username"] = user["username"]
                         session["is_admin"] = bool(user["is_admin"])
@@ -718,6 +764,7 @@ def login():
             elif not user["is_active"]:
                 error = "Conta desativada. Contate o administrador."
             else:
+                session.permanent  = True   # mantém login por 60 dias
                 session["user_id"]  = user["id"]
                 session["username"] = user["username"]
                 session["is_admin"] = bool(user["is_admin"])

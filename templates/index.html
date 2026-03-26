@@ -353,6 +353,20 @@ html,body{
   .full-col{grid-column:1/-1}
   .log-box{height:280px}
 }
+
+/* Animações WIN/LOSS */
+@keyframes flashFade {
+  from { opacity:1 }
+  to   { opacity:0 }
+}
+@keyframes bannerIn {
+  from { opacity:0; transform:translate(-50%,-50%) scale(.6) }
+  to   { opacity:1; transform:translate(-50%,-50%) scale(1)  }
+}
+@keyframes bannerOut {
+  from { opacity:1; transform:translate(-50%,-50%) scale(1)   }
+  to   { opacity:0; transform:translate(-50%,-50%) scale(.85) }
+}
 </style>
 </head>
 <body>
@@ -762,6 +776,78 @@ function addTrade(m) { tradeHist.unshift(m); renderHist(); }
 function updResult(m) {
   const t = tradeHist.find(t => t.id === m.id);
   if (t) { t.resultado = m.resultado; t.lucro = m.lucro; renderHist(); }
+  showResultBanner(m);
+}
+
+// ── Flash de resultado (WIN/LOSS) ──────────────────────────────────────────
+function showResultBanner(m) {
+  const won   = m.resultado === 'W';
+  const brl   = m.lucro ? Math.abs(m.lucro * 5.7).toFixed(2) : null;
+  const label = won ? 'WIN' : 'LOSS';
+  const icon  = won ? '💰' : '❌';
+  const color = won ? '#30D158' : '#FF453A';
+  const bg    = won ? 'rgba(48,209,88,.18)' : 'rgba(255,69,58,.18)';
+  const sign  = won ? '+' : '−';
+
+  // Flash de tela
+  const flash = document.createElement('div');
+  flash.style.cssText = `
+    position:fixed;inset:0;z-index:8000;pointer-events:none;
+    background:${won ? 'rgba(48,209,88,.10)' : 'rgba(255,69,58,.10)'};
+    animation:flashFade .55s ease-out forwards;
+  `;
+  document.body.appendChild(flash);
+  setTimeout(() => flash.remove(), 600);
+
+  // Banner central
+  const banner = document.createElement('div');
+  banner.style.cssText = `
+    position:fixed;top:50%;left:50%;transform:translate(-50%,-50%) scale(.6);
+    z-index:8001;
+    background:rgba(28,28,30,.97);border:1.5px solid ${color};
+    border-radius:24px;padding:24px 40px;text-align:center;
+    box-shadow:0 8px 40px rgba(0,0,0,.7), 0 0 0 1px ${color}22;
+    backdrop-filter:blur(24px);
+    animation:bannerIn .32s cubic-bezier(.34,1.56,.64,1) forwards;
+    pointer-events:none;
+  `;
+  banner.innerHTML = `
+    <div style="font-size:44px;line-height:1;margin-bottom:6px">${icon}</div>
+    <div style="font-size:32px;font-weight:800;color:${color};letter-spacing:.5px">${label}</div>
+    ${brl ? `<div style="font-size:19px;font-weight:600;color:${color};margin-top:4px;opacity:.85">${sign}R$ ${brl}</div>` : ''}
+  `;
+  document.body.appendChild(banner);
+  setTimeout(() => {
+    banner.style.animation = 'bannerOut .28s ease-in forwards';
+    setTimeout(() => banner.remove(), 300);
+  }, 1600);
+
+  if (won) playCoin();
+}
+
+// Som de moeda via Web Audio API (sem arquivo externo)
+function playCoin() {
+  try {
+    const ctx = new (window.AudioContext || window.webkitAudioContext)();
+    const notes = [
+      {f: 1047, t: 0,    d: 0.08},  // C6
+      {f: 1319, t: 0.05, d: 0.08},  // E6
+      {f: 1568, t: 0.10, d: 0.14},  // G6
+      {f: 2093, t: 0.16, d: 0.20},  // C7
+    ];
+    notes.forEach(({f, t, d}) => {
+      const osc  = ctx.createOscillator();
+      const gain = ctx.createGain();
+      osc.connect(gain); gain.connect(ctx.destination);
+      osc.frequency.value = f;
+      osc.type = 'sine';
+      gain.gain.setValueAtTime(0, ctx.currentTime + t);
+      gain.gain.linearRampToValueAtTime(0.18, ctx.currentTime + t + 0.02);
+      gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + t + d);
+      osc.start(ctx.currentTime + t);
+      osc.stop(ctx.currentTime + t + d + 0.05);
+    });
+  } catch(e) {}
 }
 
 function renderHist() {
