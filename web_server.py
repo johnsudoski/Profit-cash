@@ -258,9 +258,10 @@ class SessionState:
         self.broadcast({"type": "trade", "id": str(tid),
                         "ativo": ativo, "direcao": direcao, "valor": valor})
 
-    def resultado(self, tid, resultado, lucro):
+    def resultado(self, tid, resultado, lucro, lucro_brl=0):
         self.broadcast({"type": "resultado", "id": str(tid),
-                        "resultado": resultado, "lucro": round(lucro, 2)})
+                        "resultado": resultado, "lucro": round(lucro, 2),
+                        "lucro_brl": round(lucro_brl, 2)})
 
 
 _sessions: dict[str, SessionState] = {}
@@ -471,6 +472,41 @@ async def _deriv_bot_async(ss: SessionState, token: str, valor_brl: float,
                     aname = ASSET_NAMES.get(asset, asset)
                     ss.log(f"📡 Proposta enviada: {direction} {aname} (req#{rid})", "info")
 
+                # ── LIQUIDAR CONTRATO (função local reutilizável) ────────
+                def _liquidar(cid):
+                    nonlocal wins, losses, lucro_total
+                    info = active_cx.pop(cid, None)
+                    if not info:
+                        return
+                    asset_cx    = info["asset"]
+                    direction_cx= info["direction"]
+                    entry_price = info["entry_price"]
+                    bp          = info["buy_price"]
+                    tid         = info["tid"]
+                    payout_est  = info.get("expected_payout", bp * 1.85)
+                    ticks       = tick_buf.get(asset_cx, [])
+                    if not ticks:
+                        # Sem ticks: devolve ao dicionário para tentar no próximo tick
+                        active_cx[cid] = info
+                        return
+                    exit_price = ticks[-1]
+                    won = (exit_price > entry_price if direction_cx == "CALL"
+                           else exit_price < entry_price)
+                    if won:
+                        profit       = payout_est - bp
+                        wins        += 1
+                        lucro_total += profit
+                        profit_brl   = profit * rate_brl
+                        ss.log(f"✅ WIN  +R${profit_brl:.2f} | {direction_cx} {entry_price:.5g}→{exit_price:.5g}", "win")
+                        ss.resultado(tid, "W", profit, lucro_brl=profit_brl)
+                    else:
+                        losses      += 1
+                        lucro_total -= bp
+                        loss_brl     = bp * rate_brl
+                        ss.log(f"❌ LOSS −R${loss_brl:.2f} | {direction_cx} {entry_price:.5g}→{exit_price:.5g}", "loss")
+                        ss.resultado(tid, "L", -bp, lucro_brl=-loss_brl)
+                    ss.update_estado(wins=wins, losses=losses, lucro=lucro_total)
+
                 # ── LOOP PRINCIPAL ────────────────────────────────────────
                 while not ss.stop_evt.is_set():
                     try:
@@ -479,38 +515,10 @@ async def _deriv_bot_async(ss: SessionState, token: str, valor_brl: float,
                         if ss.stop_evt.is_set(): break
                         await dws.send(json.dumps({"ping": 1}))
                         now = time.time()
-                        # ── Liquidar contratos expirados por preço ──────────
-                        for cid in list(active_cx.keys()):
-                            info = active_cx.get(cid)
-                            if not info or now < info.get("expires_at", float("inf")):
-                                continue
-                            asset_cx    = info["asset"]
-                            direction_cx= info["direction"]
-                            entry_price = info["entry_price"]
-                            bp          = info["buy_price"]
-                            tid         = info["tid"]
-                            payout_est  = info.get("expected_payout", bp * 1.85)
-                            ticks       = tick_buf.get(asset_cx, [])
-                            if not ticks:
-                                continue  # sem ticks, aguardar
-                            exit_price = ticks[-1]
-                            won = (exit_price > entry_price if direction_cx == "CALL"
-                                   else exit_price < entry_price)
-                            active_cx.pop(cid)
-                            if won:
-                                profit       = payout_est - bp
-                                wins        += 1
-                                lucro_total += profit
-                                profit_brl   = profit * rate_brl
-                                ss.log(f"✅ WIN  +R${profit_brl:.2f} | {direction_cx} {entry_price:.5g}→{exit_price:.5g}", "win")
-                                ss.resultado(tid, "W", profit)
-                            else:
-                                losses      += 1
-                                lucro_total -= bp
-                                loss_brl     = bp * rate_brl
-                                ss.log(f"❌ LOSS −R${loss_brl:.2f} | {direction_cx} {entry_price:.5g}→{exit_price:.5g}", "loss")
-                                ss.resultado(tid, "L", -bp)
-                            ss.update_estado(wins=wins, losses=losses, lucro=lucro_total)
+                        # Liquidar expirados (fallback para quando não há ticks)
+                        for cid in [c for c, i in list(active_cx.items())
+                                    if now >= i.get("expires_at", float("inf"))]:
+                            _liquidar(cid)
                         # Status periódico a cada 60s
                         if now - last_status[0] > 60:
                             last_status[0] = now
@@ -547,12 +555,17 @@ async def _deriv_bot_async(ss: SessionState, token: str, valor_brl: float,
                         if len(tick_buf[asset]) > 200:
                             tick_buf[asset] = tick_buf[asset][-200:]
 
+                        # ── Liquidar contratos expirados a cada tick ────────
+                        now = time.time()
+                        for cid in [c for c, i in list(active_cx.items())
+                                    if now >= i.get("expires_at", float("inf"))]:
+                            _liquidar(cid)
+
                         n_ticks = len(tick_buf[asset])
                         if n_ticks < 21:
                             continue  # Aguarda histórico suficiente
 
                         # Status periódico de diagnóstico
-                        now = time.time()
                         if now - last_status[0] > 60:
                             last_status[0] = now
                             rsi_now = calc_rsi(tick_buf[asset], 14)
@@ -604,7 +617,7 @@ async def _deriv_bot_async(ss: SessionState, token: str, valor_brl: float,
                         }
 
                         aname = ASSET_NAMES.get(info["asset"], info["asset"])
-                        ss.trade(f"T{trade_count}", aname, info["direction"].lower(), stake)
+                        ss.trade(f"T{trade_count}", aname, info["direction"].lower(), valor_brl)
                         ss.log(f"🛒 Comprando contrato: {info['direction']} {aname} "
                                f"R${valor_brl:.2f} (ask: {currency} {ask_price:.2f})", "info")
 

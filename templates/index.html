@@ -575,11 +575,13 @@ html,body{
         <div class="callout mt12">
           <span class="callout-icon">ℹ️</span>
           <span>
-            Gere seu Token API gratuito em
+            Não tem conta?
+            <a href="https://deriv.partners/rx?sidc=EF6BE521-1809-4A1B-92F5-29F0D6C8CBA8&utm_campaign=dynamicworks&utm_medium=affiliate&utm_source=CU310980"
+              target="_blank" style="color:var(--blue);text-decoration:none;font-weight:600">Crie gratuitamente na Deriv</a>.
+            Depois gere seu Token API em
             <a href="https://app.deriv.com/account/api-token" target="_blank"
               style="color:var(--blue);text-decoration:none;font-weight:600">app.deriv.com</a>
-            — marque permissão <strong>Read + Trade</strong>.
-            O token é salvo automaticamente após o primeiro uso.
+            — marque <strong>Read + Trade</strong>.
           </span>
         </div>
 
@@ -775,14 +777,14 @@ function addTrade(m) { tradeHist.unshift(m); renderHist(); }
 
 function updResult(m) {
   const t = tradeHist.find(t => t.id === m.id);
-  if (t) { t.resultado = m.resultado; t.lucro = m.lucro; renderHist(); }
+  if (t) { t.resultado = m.resultado; t.lucro = m.lucro; t.lucro_brl = m.lucro_brl; renderHist(); }
   showResultBanner(m);
 }
 
 // ── Flash de resultado (WIN/LOSS) ──────────────────────────────────────────
 function showResultBanner(m) {
   const won   = m.resultado === 'W';
-  const brl   = m.lucro ? Math.abs(m.lucro * 5.7).toFixed(2) : null;
+  const brl   = m.lucro_brl != null ? Math.abs(m.lucro_brl).toFixed(2) : (m.lucro ? Math.abs(m.lucro).toFixed(2) : null);
   const label = won ? 'WIN' : 'LOSS';
   const icon  = won ? '💰' : '❌';
   const color = won ? '#30D158' : '#FF453A';
@@ -861,7 +863,11 @@ function renderHist() {
       <div style="text-align:right">
         ${t.valor ? `<div class="trade-amount">R$ ${t.valor.toFixed(2)}</div>` : ''}
         <div class="trade-result ${t.resultado === 'W' ? 'win' : t.resultado === 'L' ? 'loss' : 'pending'}">
-          ${t.resultado === 'W' ? '✓ WIN' : t.resultado === 'L' ? '✗ LOSS' : '● '}
+          ${t.resultado === 'W'
+            ? `✓ WIN${t.lucro_brl != null ? ' +R$'+Math.abs(t.lucro_brl).toFixed(2) : ''}`
+            : t.resultado === 'L'
+              ? `✗ LOSS${t.lucro_brl != null ? ' −R$'+Math.abs(t.lucro_brl).toFixed(2) : ''}`
+              : '● aguardando'}
         </div>
       </div>
     </div>`).join('');
@@ -975,19 +981,19 @@ initTokenUI();            // Mostra campo manual ou botão conforme estado
     <div class="tmodal-step">
       <div class="tmodal-step-num">1</div>
       <div class="tmodal-step-text">
-        Clique no botão abaixo para abrir a Deriv em uma nova aba
+        Ainda não tem conta na Deriv? <strong>Crie gratuitamente</strong> clicando abaixo
       </div>
     </div>
     <div class="tmodal-step">
       <div class="tmodal-step-num">2</div>
       <div class="tmodal-step-text">
-        Faça login na sua conta Deriv (ou crie uma gratuitamente)
+        Faça login e acesse a página de tokens (botão "Criar meu token" abaixo)
       </div>
     </div>
     <div class="tmodal-step">
       <div class="tmodal-step-num">3</div>
       <div class="tmodal-step-text">
-        Na página que abrir, clique em <strong>"Create token"</strong>,<br>
+        Clique em <strong>"Create token"</strong>,
         marque <strong>Read</strong> e <strong>Trade</strong>, dê um nome e clique em <strong>Create</strong>
       </div>
     </div>
@@ -998,8 +1004,16 @@ initTokenUI();            // Mostra campo manual ou botão conforme estado
       </div>
     </div>
 
-    <a class="tmodal-btn-primary" href="https://app.deriv.com/account/api-token" target="_blank" onclick="onOpenDeriv()">
-      <span style="font-size:20px">🔗</span> Abrir Deriv — criar meu token
+    <a class="tmodal-btn-primary"
+       href="https://deriv.partners/rx?sidc=EF6BE521-1809-4A1B-92F5-29F0D6C8CBA8&utm_campaign=dynamicworks&utm_medium=affiliate&utm_source=CU310980"
+       target="_blank"
+       style="margin-bottom:8px">
+      <span style="font-size:20px">🆓</span> Criar conta na Deriv — grátis
+    </a>
+
+    <a class="tmodal-btn-primary" href="https://app.deriv.com/account/api-token" target="_blank" onclick="onOpenDeriv()"
+       style="background:rgba(255,255,255,.07);border:1px solid rgba(255,255,255,.15)">
+      <span style="font-size:20px">🔗</span> Já tenho conta — criar meu token
     </a>
 
     <div class="tmodal-paste-area" id="pasteArea" style="display:none">
