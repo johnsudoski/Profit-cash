@@ -467,6 +467,8 @@ async def _deriv_bot_async(ss: SessionState, token: str, valor_brl: float,
     # conf_adj: ajuste dinâmico no threshold de confiança (-0.05 a +0.20)
     # pause_until: timestamp até quando o ativo está pausado por losses seguidos
     perf = {a: {"hist": [], "conf_adj": 0.0, "pause_until": 0.0} for a in ASSETS}
+    # Histórico global em ordem cronológica (para stop por sequência)
+    global_hist = []   # lista de 1/0 na ordem em que as operações fecharam
 
     ss.log("Conectando à Deriv…", "info")
     ss.update_estado(rodando=True)
@@ -632,6 +634,17 @@ async def _deriv_bot_async(ss: SessionState, token: str, valor_brl: float,
                     if len(recent_hist) >= 2 and recent_hist[-2:] == [0, 0]:
                         perf[asset_cx]["pause_until"] = time.time() + 600  # pausa 10 min
                         ss.log(f"⏸️ {ASSET_NAMES.get(asset_cx, asset_cx)}: 2 losses seguidos → pausado 10 min", "warn")
+                    # ── Stop global: 3 losses seguidos (ordem cronológica) ───
+                    global_hist.append(1 if won else 0)
+                    if len(global_hist) > 50:
+                        global_hist.pop(0)
+                    if len(global_hist) >= 3 and global_hist[-3:] == [0, 0, 0]:
+                        ss.log(
+                            "🛑 3 LOSSES SEGUIDOS — Robô pausado automaticamente. "
+                            "Reinicie manualmente quando quiser continuar.",
+                            "loss"
+                        )
+                        ss.stop_evt.set()
 
                 # ── LOOP PRINCIPAL ────────────────────────────────────────
                 while not ss.stop_evt.is_set():
