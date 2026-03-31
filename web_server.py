@@ -54,9 +54,10 @@ ASSET_NAMES = {
 }
 STRATEGIES = {
     # stop_diario_pct: para o robô se a perda acumulada passar X% do saldo inicial
-    "cautelosa": {"duracao": 5, "rsi_upper": 72, "rsi_lower": 28, "conf_min": 0.68, "stop_diario_pct": 0.15},
-    "moderada":  {"duracao": 3, "rsi_upper": 67, "rsi_lower": 33, "conf_min": 0.60, "stop_diario_pct": 0.25},
-    "agressiva": {"duracao": 1, "rsi_upper": 62, "rsi_lower": 38, "conf_min": 0.52, "stop_diario_pct": 0.35},
+    # rsi_upper/lower mais extremos = menos operações, mais qualidade
+    "cautelosa": {"duracao": 5, "rsi_upper": 75, "rsi_lower": 25, "conf_min": 0.78, "stop_diario_pct": 0.15},
+    "moderada":  {"duracao": 3, "rsi_upper": 70, "rsi_lower": 30, "conf_min": 0.70, "stop_diario_pct": 0.25},
+    "agressiva": {"duracao": 1, "rsi_upper": 65, "rsi_lower": 35, "conf_min": 0.62, "stop_diario_pct": 0.35},
 }
 
 
@@ -277,19 +278,17 @@ def get_or_create_session(sid: str) -> SessionState:
 
 
 # ════════════════════════════════════════════════════════
-#  INDICADORES TÉCNICOS — v2 (Wilder RSI + EMA + Bollinger)
+#  INDICADORES TÉCNICOS — v3 (Reversão RSI + Stochastic + BB obrigatório)
 # ════════════════════════════════════════════════════════
 def calc_rsi(prices: list, period: int = 14) -> float:
-    """RSI de Wilder — usa suavização exponencial (EMA), não média simples."""
+    """RSI de Wilder — suavização exponencial."""
     if len(prices) < period + 1:
         return 50.0
-    changes = [prices[i] - prices[i - 1] for i in range(1, len(prices))]
-    gains   = [max(c, 0.0) for c in changes]
-    losses  = [max(-c, 0.0) for c in changes]
-    # Seed: média simples dos primeiros `period` valores
+    changes  = [prices[i] - prices[i - 1] for i in range(1, len(prices))]
+    gains    = [max(c, 0.0) for c in changes]
+    losses   = [max(-c, 0.0) for c in changes]
     avg_gain = sum(gains[:period]) / period
     avg_loss = sum(losses[:period]) / period
-    # Suavização de Wilder para o restante
     for i in range(period, len(gains)):
         avg_gain = (avg_gain * (period - 1) + gains[i]) / period
         avg_loss = (avg_loss * (period - 1) + losses[i]) / period
@@ -299,18 +298,18 @@ def calc_rsi(prices: list, period: int = 14) -> float:
 
 
 def calc_ema(prices: list, period: int) -> float:
-    """EMA (Exponential Moving Average) — reage mais rápido que SMA."""
+    """EMA — reage mais rápido que SMA."""
     if len(prices) < period:
         return prices[-1] if prices else 0.0
     k   = 2.0 / (period + 1)
-    ema = sum(prices[:period]) / period  # seed com SMA
+    ema = sum(prices[:period]) / period
     for p in prices[period:]:
         ema = p * k + ema * (1.0 - k)
     return ema
 
 
 def calc_bb(prices: list, period: int = 20, num_std: float = 2.0):
-    """Bollinger Bands — retorna (mid, upper, lower). None se dados insuficientes."""
+    """Bollinger Bands — retorna (mid, upper, lower)."""
     if len(prices) < period:
         return None, None, None
     window = prices[-period:]
@@ -319,70 +318,119 @@ def calc_bb(prices: list, period: int = 20, num_std: float = 2.0):
     return mid, mid + num_std * std, mid - num_std * std
 
 
+def calc_stoch(prices: list, k_period: int = 14, d_period: int = 3):
+    """
+    Stochastic Oscillator (%K e %D).
+    %K: posição do preço atual dentro do range high-low dos últimos k_period ticks.
+    %D: média móvel de %K (sinal suavizado).
+    """
+    if len(prices) < k_period + d_period:
+        return 50.0, 50.0
+    k_series = []
+    for offset in range(d_period - 1, -1, -1):
+        window = prices[-(k_period + offset): len(prices) - offset if offset > 0 else None]
+        lo, hi = min(window), max(window)
+        price  = prices[-(offset + 1)] if offset > 0 else prices[-1]
+        k_series.append(50.0 if hi == lo else (price - lo) / (hi - lo) * 100.0)
+    k_now = k_series[-1]
+    d_now = sum(k_series) / len(k_series)
+    return k_now, d_now
+
+
 def calc_signal(prices: list, config: dict):
     """
-    Sinal com 4 indicadores:
-      1. RSI Wilder(14)       — +0.35 (sinal primário)
-      2. EMA 9/21 cruzamento  — +0.20 (confirmação de tendência)
-      3. Bollinger Bands(20)  — +0.25 (confirmação de extremo)
-      4. Momentum 8 ticks     — +0.20 (impulso recente)
+    Sinal v3 — Reversão confirmada (4 filtros):
+
+      FILTRO 1 — RSI REVERSÃO (obrigatório, +0.40)
+        Não basta RSI estar extremo — ele precisa ter PICADO e estar VIRANDO.
+        • PUT: RSI estava acima do limite em t-2 e t-1, e agora caiu (peak confirmado)
+        • CALL: RSI estava abaixo do limite em t-2 e t-1, e agora subiu (bottom confirmado)
+
+      FILTRO 2 — Bollinger Bands (obrigatório, +0.25)
+        Preço DEVE estar tocando a banda. Se não estiver, não há extremo real.
+
+      FILTRO 3 — Stochastic %K/%D (confirmação, +0.20)
+        %K e %D acima de 80 (overbought) para PUT, abaixo de 20 para CALL.
+
+      FILTRO 4 — EMA 9/21 direção (+0.15)
+        Confirmação de tendência de curto prazo.
+
     Confiança máxima: 1.00
+    Filtros 1 e 2 são OBRIGATÓRIOS — sem eles não opera.
     """
-    if len(prices) < 22:
+    # Precisa de dados suficientes para RSI em t, t-1, t-2 + Stoch
+    if len(prices) < 35:
         return None, 0.0, "", []
 
-    rsi      = calc_rsi(prices, 14)
-    ema_fast = calc_ema(prices, 9)
-    ema_slow = calc_ema(prices, 21)
+    # RSI em 3 momentos para detectar reversão
+    rsi_now  = calc_rsi(prices,      14)
+    rsi_prev = calc_rsi(prices[:-1], 14)
+    rsi_2ago = calc_rsi(prices[:-2], 14)
+
+    ema_fast           = calc_ema(prices, 9)
+    ema_slow           = calc_ema(prices, 21)
     _, bb_upper, bb_lower = calc_bb(prices, 20, 2.0)
-    price_now = prices[-1]
+    stoch_k, stoch_d   = calc_stoch(prices, 14, 3)
+    price_now          = prices[-1]
 
     direction = None
     conf      = 0.0
     motivo    = ""
     votos     = []
 
-    # ── 1. RSI Wilder (+0.35) ─────────────────────────────────────────────────
-    if rsi > config["rsi_upper"]:
+    # ── FILTRO 1: RSI REVERSÃO (obrigatório) ──────────────────────────────────
+    # PUT: RSI estava acima do limite e agora está caindo
+    put_rsi_peak  = (rsi_2ago >= config["rsi_upper"] and
+                     rsi_prev  >= config["rsi_upper"] and
+                     rsi_now   <  rsi_prev)
+    # CALL: RSI estava abaixo do limite e agora está subindo
+    call_rsi_bottom = (rsi_2ago <= config["rsi_lower"] and
+                       rsi_prev  <= config["rsi_lower"] and
+                       rsi_now   >  rsi_prev)
+
+    if put_rsi_peak:
         direction = "PUT"
-        conf     += 0.35
-        motivo    = f"RSI sobrecomprado ({rsi:.1f})"
-        votos.append(f"RSI {rsi:.0f} ↓")
-    elif rsi < config["rsi_lower"]:
+        conf     += 0.40
+        motivo    = f"RSI reverteu de {rsi_prev:.1f}→{rsi_now:.1f} (pico confirmado)"
+        votos.append(f"RSI↓ {rsi_now:.0f}")
+    elif call_rsi_bottom:
         direction = "CALL"
-        conf     += 0.35
-        motivo    = f"RSI sobrevendido ({rsi:.1f})"
-        votos.append(f"RSI {rsi:.0f} ↑")
+        conf     += 0.40
+        motivo    = f"RSI reverteu de {rsi_prev:.1f}→{rsi_now:.1f} (fundo confirmado)"
+        votos.append(f"RSI↑ {rsi_now:.0f}")
     else:
-        return None, 0.0, "", []  # sem sinal primário, não opera
+        return None, 0.0, "", []  # sem reversão confirmada → não opera
 
-    # ── 2. EMA cruzamento 9/21 (+0.20 / -0.05) ───────────────────────────────
+    # ── FILTRO 2: BOLLINGER BANDS (obrigatório) ───────────────────────────────
+    if bb_upper is None or bb_lower is None:
+        return None, 0.0, "", []  # dados insuficientes
+
+    bb_range   = bb_upper - bb_lower
+    bb_margin  = bb_range * 0.05          # 5% de tolerância na banda
+
+    if direction == "CALL" and price_now <= (bb_lower + bb_margin):
+        conf += 0.25; votos.append("BB banda ↓ ✓")
+    elif direction == "PUT" and price_now >= (bb_upper - bb_margin):
+        conf += 0.25; votos.append("BB banda ↑ ✓")
+    else:
+        # Preço não está na banda — sinal fraco, não opera
+        return None, 0.0, "", []
+
+    # ── FILTRO 3: STOCHASTIC (+0.20) ──────────────────────────────────────────
+    if direction == "CALL" and stoch_k < 25 and stoch_d < 30:
+        conf += 0.20; votos.append(f"STOCH↑ {stoch_k:.0f}")
+    elif direction == "PUT" and stoch_k > 75 and stoch_d > 70:
+        conf += 0.20; votos.append(f"STOCH↓ {stoch_k:.0f}")
+    else:
+        votos.append(f"STOCH✗ {stoch_k:.0f}")
+
+    # ── FILTRO 4: EMA 9/21 (+0.15) ────────────────────────────────────────────
     if direction == "CALL" and ema_fast > ema_slow:
-        conf += 0.20; votos.append("EMA ↑")
+        conf += 0.15; votos.append("EMA ↑")
     elif direction == "PUT" and ema_fast < ema_slow:
-        conf += 0.20; votos.append("EMA ↓")
+        conf += 0.15; votos.append("EMA ↓")
     else:
-        conf -= 0.05; votos.append("EMA ✗")
-
-    # ── 3. Bollinger Bands (+0.25 / -0.05) ───────────────────────────────────
-    if bb_upper is not None and bb_lower is not None:
-        if direction == "CALL" and price_now <= bb_lower:
-            conf += 0.25; votos.append("BB baixo ✓")
-        elif direction == "PUT" and price_now >= bb_upper:
-            conf += 0.25; votos.append("BB alto ✓")
-        else:
-            conf -= 0.05; votos.append("BB ✗")
-
-    # ── 4. Momentum 8 ticks (+0.20) ───────────────────────────────────────────
-    recent = prices[-9:]  # 8 variações (janela de 9 pontos)
-    ups    = sum(1 for i in range(1, len(recent)) if recent[i] > recent[i - 1])
-    downs  = len(recent) - 1 - ups
-    if direction == "CALL" and downs >= 5:   # maioria caindo → rebote esperado
-        conf += 0.20; votos.append("MOM ↓→↑")
-    elif direction == "PUT" and ups >= 5:    # maioria subindo → queda esperada
-        conf += 0.20; votos.append("MOM ↑→↓")
-    else:
-        votos.append("MOM ✗")
+        votos.append("EMA ✗")
 
     return direction, max(0.0, min(1.0, conf)), motivo, votos
 
@@ -631,9 +679,19 @@ async def _deriv_bot_async(ss: SessionState, token: str, valor_brl: float,
                         # Status periódico de diagnóstico
                         if now - last_status[0] > 60:
                             last_status[0] = now
-                            rsi_now = calc_rsi(tick_buf[asset], 14)
-                            ss.log(f"🔍 RSI {ASSET_NAMES.get(asset,asset)}: {rsi_now:.1f} "
-                                   f"(limite: <{config['rsi_lower']} ou >{config['rsi_upper']})", "info")
+                            _buf = tick_buf[asset]
+                            rsi_now  = calc_rsi(_buf,      14)
+                            rsi_prev = calc_rsi(_buf[:-1], 14) if len(_buf) > 15 else rsi_now
+                            stk, _   = calc_stoch(_buf, 14, 3)
+                            _, bbu, bbl = calc_bb(_buf, 20, 2.0)
+                            bb_info = f"BB [{bbl:.4g}–{bbu:.4g}]" if bbu else "BB n/a"
+                            ss.log(
+                                f"🔍 {ASSET_NAMES.get(asset,asset)} | "
+                                f"RSI {rsi_now:.1f} (prev {rsi_prev:.1f}) | "
+                                f"STOCH {stk:.0f} | {bb_info} | "
+                                f"Limite RSI <{config['rsi_lower']} ou >{config['rsi_upper']}",
+                                "info"
+                            )
 
                         # ── Uma operação de cada vez ───────────────────────
                         # Só abre nova trade se não há contrato ativo nem proposta pendente
