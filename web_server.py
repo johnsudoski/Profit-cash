@@ -53,9 +53,10 @@ ASSET_NAMES = {
     "R_10":  "Volatility 10",
 }
 STRATEGIES = {
-    "cautelosa": {"duracao": 5, "rsi_upper": 72, "rsi_lower": 28, "conf_min": 0.68},
-    "moderada":  {"duracao": 3, "rsi_upper": 67, "rsi_lower": 33, "conf_min": 0.60},
-    "agressiva": {"duracao": 1, "rsi_upper": 62, "rsi_lower": 38, "conf_min": 0.52},
+    # stop_diario_pct: para o robô se a perda acumulada passar X% do saldo inicial
+    "cautelosa": {"duracao": 5, "rsi_upper": 72, "rsi_lower": 28, "conf_min": 0.68, "stop_diario_pct": 0.15},
+    "moderada":  {"duracao": 3, "rsi_upper": 67, "rsi_lower": 33, "conf_min": 0.60, "stop_diario_pct": 0.25},
+    "agressiva": {"duracao": 1, "rsi_upper": 62, "rsi_lower": 38, "conf_min": 0.52, "stop_diario_pct": 0.35},
 }
 
 
@@ -276,62 +277,113 @@ def get_or_create_session(sid: str) -> SessionState:
 
 
 # ════════════════════════════════════════════════════════
-#  INDICADORES TÉCNICOS
+#  INDICADORES TÉCNICOS — v2 (Wilder RSI + EMA + Bollinger)
 # ════════════════════════════════════════════════════════
 def calc_rsi(prices: list, period: int = 14) -> float:
+    """RSI de Wilder — usa suavização exponencial (EMA), não média simples."""
     if len(prices) < period + 1:
         return 50.0
-    gains, losses = [], []
-    for i in range(1, len(prices)):
-        d = prices[i] - prices[i - 1]
-        gains.append(max(d, 0.0))
-        losses.append(max(-d, 0.0))
-    ag = sum(gains[-period:]) / period
-    al = sum(losses[-period:]) / period
-    if al == 0:
+    changes = [prices[i] - prices[i - 1] for i in range(1, len(prices))]
+    gains   = [max(c, 0.0) for c in changes]
+    losses  = [max(-c, 0.0) for c in changes]
+    # Seed: média simples dos primeiros `period` valores
+    avg_gain = sum(gains[:period]) / period
+    avg_loss = sum(losses[:period]) / period
+    # Suavização de Wilder para o restante
+    for i in range(period, len(gains)):
+        avg_gain = (avg_gain * (period - 1) + gains[i]) / period
+        avg_loss = (avg_loss * (period - 1) + losses[i]) / period
+    if avg_loss == 0:
         return 100.0
-    return 100.0 - (100.0 / (1.0 + ag / al))
+    return 100.0 - (100.0 / (1.0 + avg_gain / avg_loss))
 
 
-def calc_sma(prices: list, period: int) -> float:
+def calc_ema(prices: list, period: int) -> float:
+    """EMA (Exponential Moving Average) — reage mais rápido que SMA."""
     if len(prices) < period:
         return prices[-1] if prices else 0.0
-    return sum(prices[-period:]) / period
+    k   = 2.0 / (period + 1)
+    ema = sum(prices[:period]) / period  # seed com SMA
+    for p in prices[period:]:
+        ema = p * k + ema * (1.0 - k)
+    return ema
+
+
+def calc_bb(prices: list, period: int = 20, num_std: float = 2.0):
+    """Bollinger Bands — retorna (mid, upper, lower). None se dados insuficientes."""
+    if len(prices) < period:
+        return None, None, None
+    window = prices[-period:]
+    mid    = sum(window) / period
+    std    = (sum((p - mid) ** 2 for p in window) / period) ** 0.5
+    return mid, mid + num_std * std, mid - num_std * std
 
 
 def calc_signal(prices: list, config: dict):
-    if len(prices) < 21:
+    """
+    Sinal com 4 indicadores:
+      1. RSI Wilder(14)       — +0.35 (sinal primário)
+      2. EMA 9/21 cruzamento  — +0.20 (confirmação de tendência)
+      3. Bollinger Bands(20)  — +0.25 (confirmação de extremo)
+      4. Momentum 8 ticks     — +0.20 (impulso recente)
+    Confiança máxima: 1.00
+    """
+    if len(prices) < 22:
         return None, 0.0, "", []
+
     rsi      = calc_rsi(prices, 14)
-    sma_fast = calc_sma(prices, 5)
-    sma_slow = calc_sma(prices, 20)
+    ema_fast = calc_ema(prices, 9)
+    ema_slow = calc_ema(prices, 21)
+    _, bb_upper, bb_lower = calc_bb(prices, 20, 2.0)
+    price_now = prices[-1]
+
     direction = None
     conf      = 0.0
     motivo    = ""
     votos     = []
+
+    # ── 1. RSI Wilder (+0.35) ─────────────────────────────────────────────────
     if rsi > config["rsi_upper"]:
-        direction = "PUT";  conf += 0.40
-        motivo = f"RSI sobrecomprado ({rsi:.1f})"; votos.append(f"RSI {rsi:.0f}")
+        direction = "PUT"
+        conf     += 0.35
+        motivo    = f"RSI sobrecomprado ({rsi:.1f})"
+        votos.append(f"RSI {rsi:.0f} ↓")
     elif rsi < config["rsi_lower"]:
-        direction = "CALL"; conf += 0.40
-        motivo = f"RSI sobrevendido ({rsi:.1f})";  votos.append(f"RSI {rsi:.0f}")
+        direction = "CALL"
+        conf     += 0.35
+        motivo    = f"RSI sobrevendido ({rsi:.1f})"
+        votos.append(f"RSI {rsi:.0f} ↑")
     else:
-        return None, 0.0, "", []
-    if direction == "CALL" and sma_fast > sma_slow:
-        conf += 0.22; votos.append("SMA ↑")
-    elif direction == "PUT" and sma_fast < sma_slow:
-        conf += 0.22; votos.append("SMA ↓")
+        return None, 0.0, "", []  # sem sinal primário, não opera
+
+    # ── 2. EMA cruzamento 9/21 (+0.20 / -0.05) ───────────────────────────────
+    if direction == "CALL" and ema_fast > ema_slow:
+        conf += 0.20; votos.append("EMA ↑")
+    elif direction == "PUT" and ema_fast < ema_slow:
+        conf += 0.20; votos.append("EMA ↓")
     else:
-        conf -= 0.08; votos.append("SMA ✗")
-    recent = prices[-4:]
+        conf -= 0.05; votos.append("EMA ✗")
+
+    # ── 3. Bollinger Bands (+0.25 / -0.05) ───────────────────────────────────
+    if bb_upper is not None and bb_lower is not None:
+        if direction == "CALL" and price_now <= bb_lower:
+            conf += 0.25; votos.append("BB baixo ✓")
+        elif direction == "PUT" and price_now >= bb_upper:
+            conf += 0.25; votos.append("BB alto ✓")
+        else:
+            conf -= 0.05; votos.append("BB ✗")
+
+    # ── 4. Momentum 8 ticks (+0.20) ───────────────────────────────────────────
+    recent = prices[-9:]  # 8 variações (janela de 9 pontos)
     ups    = sum(1 for i in range(1, len(recent)) if recent[i] > recent[i - 1])
-    downs  = 3 - ups
-    if direction == "CALL" and downs >= 2:
-        conf += 0.15; votos.append("MOM ↓→↑")
-    elif direction == "PUT" and ups >= 2:
-        conf += 0.15; votos.append("MOM ↑→↓")
+    downs  = len(recent) - 1 - ups
+    if direction == "CALL" and downs >= 5:   # maioria caindo → rebote esperado
+        conf += 0.20; votos.append("MOM ↓→↑")
+    elif direction == "PUT" and ups >= 5:    # maioria subindo → queda esperada
+        conf += 0.20; votos.append("MOM ↑→↓")
     else:
         votos.append("MOM ✗")
+
     return direction, max(0.0, min(1.0, conf)), motivo, votos
 
 
@@ -506,6 +558,17 @@ async def _deriv_bot_async(ss: SessionState, token: str, valor_brl: float,
                         ss.log(f"❌ LOSS −R${loss_brl:.2f} | {direction_cx} {entry_price:.5g}→{exit_price:.5g}", "loss")
                         ss.resultado(tid, "L", -bp, lucro_brl=-loss_brl)
                     ss.update_estado(wins=wins, losses=losses, lucro=lucro_total)
+                    # ── Stop diário ──────────────────────────────────────
+                    stop_pct  = config.get("stop_diario_pct", 0.25)
+                    stop_lim  = saldo0 * stop_pct          # em moeda da conta
+                    if lucro_total < -stop_lim:
+                        loss_brl = abs(lucro_total) * rate_brl
+                        ss.log(
+                            f"🛑 STOP DIÁRIO ativado! Perda R${loss_brl:.2f} "
+                            f"({stop_pct*100:.0f}% do saldo inicial). Robô pausado.",
+                            "loss"
+                        )
+                        ss.stop_evt.set()
 
                 # ── LOOP PRINCIPAL ────────────────────────────────────────
                 while not ss.stop_evt.is_set():
