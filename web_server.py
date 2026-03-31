@@ -462,6 +462,11 @@ async def _deriv_bot_async(ss: SessionState, token: str, valor_brl: float,
     rate_brl    = 5.70  # taxa BRL→moeda da conta (atualizada após autenticação)
     last_status = [time.time()]
     pending_buy = {}   # buy_rid -> {direction, asset, expected_payout}
+    # ── Memória adaptativa por ativo ──────────────────────────────────────────
+    # hist: últimos 20 resultados (1=WIN, 0=LOSS)
+    # conf_adj: ajuste dinâmico no threshold de confiança (-0.05 a +0.20)
+    # pause_until: timestamp até quando o ativo está pausado por losses seguidos
+    perf = {a: {"hist": [], "conf_adj": 0.0, "pause_until": 0.0} for a in ASSETS}
 
     ss.log("Conectando à Deriv…", "info")
     ss.update_estado(rodando=True)
@@ -606,17 +611,27 @@ async def _deriv_bot_async(ss: SessionState, token: str, valor_brl: float,
                         ss.log(f"❌ LOSS −R${loss_brl:.2f} | {direction_cx} {entry_price:.5g}→{exit_price:.5g}", "loss")
                         ss.resultado(tid, "L", -bp, lucro_brl=-loss_brl)
                     ss.update_estado(wins=wins, losses=losses, lucro=lucro_total)
-                    # ── Stop diário ──────────────────────────────────────
-                    stop_pct  = config.get("stop_diario_pct", 0.25)
-                    stop_lim  = saldo0 * stop_pct          # em moeda da conta
-                    if lucro_total < -stop_lim:
-                        loss_brl = abs(lucro_total) * rate_brl
-                        ss.log(
-                            f"🛑 STOP DIÁRIO ativado! Perda R${loss_brl:.2f} "
-                            f"({stop_pct*100:.0f}% do saldo inicial). Robô pausado.",
-                            "loss"
-                        )
-                        ss.stop_evt.set()
+                    # ── Aprendizado adaptativo ────────────────────────────
+                    # Registra resultado por ativo para ajustar threshold
+                    perf[asset_cx]["hist"].append(1 if won else 0)
+                    if len(perf[asset_cx]["hist"]) > 20:
+                        perf[asset_cx]["hist"] = perf[asset_cx]["hist"][-20:]
+                    recent_hist = perf[asset_cx]["hist"]
+                    if len(recent_hist) >= 4:
+                        win_rate = sum(recent_hist) / len(recent_hist)
+                        if win_rate >= 0.65:
+                            # Ativo performando bem → relaxa um pouco o threshold
+                            perf[asset_cx]["conf_adj"] = max(-0.05, perf[asset_cx]["conf_adj"] - 0.01)
+                        elif win_rate < 0.40:
+                            # Ativo performando mal → exige mais confiança
+                            perf[asset_cx]["conf_adj"] = min(0.20, perf[asset_cx]["conf_adj"] + 0.03)
+                        else:
+                            # Neutro → volta gradualmente ao zero
+                            perf[asset_cx]["conf_adj"] *= 0.95
+                    # Pausa por ativo após 2 losses seguidos
+                    if len(recent_hist) >= 2 and recent_hist[-2:] == [0, 0]:
+                        perf[asset_cx]["pause_until"] = time.time() + 600  # pausa 10 min
+                        ss.log(f"⏸️ {ASSET_NAMES.get(asset_cx, asset_cx)}: 2 losses seguidos → pausado 10 min", "warn")
 
                 # ── LOOP PRINCIPAL ────────────────────────────────────────
                 while not ss.stop_evt.is_set():
@@ -688,14 +703,29 @@ async def _deriv_bot_async(ss: SessionState, token: str, valor_brl: float,
                             ss.log(
                                 f"🔍 {ASSET_NAMES.get(asset,asset)} | "
                                 f"RSI {rsi_now:.1f} (prev {rsi_prev:.1f}) | "
-                                f"STOCH {stk:.0f} | {bb_info} | "
-                                f"Limite RSI <{config['rsi_lower']} ou >{config['rsi_upper']}",
+                                f"STOCH {stk:.0f} | {bb_info}",
                                 "info"
                             )
+                            # Log do aprendizado adaptativo por ativo
+                            for _a, _p in perf.items():
+                                if not _p["hist"]: continue
+                                _wr  = sum(_p["hist"]) / len(_p["hist"])
+                                _adj = _p["conf_adj"]
+                                _lbl = "🟢" if _wr >= 0.60 else ("🟡" if _wr >= 0.45 else "🔴")
+                                ss.log(
+                                    f"🧠 {ASSET_NAMES.get(_a,_a)}: "
+                                    f"acerto {_wr*100:.0f}% ({len(_p['hist'])} ops) | "
+                                    f"threshold adj {_adj:+.2f}",
+                                    "info"
+                                )
 
                         # ── Uma operação de cada vez ───────────────────────
                         # Só abre nova trade se não há contrato ativo nem proposta pendente
                         if active_cx or pending_p or pending_buy:
+                            continue
+
+                        # ── Pausa adaptativa por ativo ──────────────────────
+                        if now < perf[asset].get("pause_until", 0):
                             continue
 
                         cooldown = config["duracao"] * 60 + 15
@@ -703,7 +733,9 @@ async def _deriv_bot_async(ss: SessionState, token: str, valor_brl: float,
                             continue
 
                         direction, conf, motivo, votos = calc_signal(tick_buf[asset], config)
-                        if direction and conf >= config["conf_min"]:
+                        # Threshold adaptativo: base + ajuste aprendido para este ativo
+                        conf_threshold = config["conf_min"] + perf[asset]["conf_adj"]
+                        if direction and conf >= conf_threshold:
                             aname = ASSET_NAMES.get(asset, asset)
                             ss.sinal(aname, direction, conf, motivo, votos)
                             last_trade[asset] = now
