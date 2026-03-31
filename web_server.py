@@ -635,6 +635,11 @@ async def _deriv_bot_async(ss: SessionState, token: str, valor_brl: float,
                             ss.log(f"🔍 RSI {ASSET_NAMES.get(asset,asset)}: {rsi_now:.1f} "
                                    f"(limite: <{config['rsi_lower']} ou >{config['rsi_upper']})", "info")
 
+                        # ── Uma operação de cada vez ───────────────────────
+                        # Só abre nova trade se não há contrato ativo nem proposta pendente
+                        if active_cx or pending_p or pending_buy:
+                            continue
+
                         cooldown = config["duracao"] * 60 + 15
                         if now - last_trade[asset] < cooldown:
                             continue
