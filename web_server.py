@@ -621,6 +621,36 @@ async def _deriv_bot_async(ss: SessionState, token: str, valor_brl: float,
     pending_signal = {a: None for a in ASSETS}  # {direction, conf, motivo, votos, ts}
     # ── Tick speed: rastreia velocidade dos ticks (atividade do mercado) ──────
     tick_times = {a: [] for a in ASSETS}
+    # ── Ranking dinâmico: histórico com timestamp para calcular melhor ativo ──
+    # Cada entrada: {"ts": float, "won": bool}  (mantém só últimas 2h)
+    asset_log = {a: [] for a in ASSETS}
+    _TWO_HOURS = 7200  # segundos
+
+    def _best_asset():
+        """
+        Retorna o ativo com maior taxa de acerto nas últimas 2h.
+        Critérios de desempate: mais operações ganha (mais dados = mais confiança).
+        Retorna None se nenhum ativo tem operações suficientes (mínimo 3).
+        Ativos com pausa ativa são excluídos.
+        """
+        now_ts  = time.time()
+        cutoff  = now_ts - _TWO_HOURS
+        best    = None
+        best_wr = -1.0
+        best_n  = 0
+        for a in ASSETS:
+            if now_ts < perf[a].get("pause_until", 0):
+                continue  # ativo pausado por losses seguidos
+            recent = [e for e in asset_log[a] if e["ts"] >= cutoff]
+            n = len(recent)
+            if n < 3:
+                continue  # dados insuficientes para decisão
+            wr = sum(1 for e in recent if e["won"]) / n
+            if wr > best_wr or (wr == best_wr and n > best_n):
+                best_wr = wr
+                best_n  = n
+                best    = a
+        return best, best_wr, best_n
 
     ss.log("Conectando à Deriv…", "info")
     ss.update_estado(rodando=True)
@@ -781,6 +811,11 @@ async def _deriv_bot_async(ss: SessionState, token: str, valor_brl: float,
                     # Registra resultado por ativo para ajustar threshold
                     perf[asset_cx]["hist"].append(1 if won else 0)
                     perf[asset_cx]["last_result"] = 1 if won else 0
+                    # ── Ranking dinâmico: registra com timestamp ──────────
+                    asset_log[asset_cx].append({"ts": time.time(), "won": won})
+                    # Descarta entradas com mais de 2h para não acumular
+                    _cutoff = time.time() - _TWO_HOURS
+                    asset_log[asset_cx] = [e for e in asset_log[asset_cx] if e["ts"] >= _cutoff]
                     if len(perf[asset_cx]["hist"]) > 20:
                         perf[asset_cx]["hist"] = perf[asset_cx]["hist"][-20:]
                     recent_hist = perf[asset_cx]["hist"]
@@ -888,15 +923,36 @@ async def _deriv_bot_async(ss: SessionState, token: str, valor_brl: float,
                                 f"STOCH {stk:.0f} | {bb_info}",
                                 "info"
                             )
+                            # ── Ranking dinâmico das últimas 2h ──────────────
+                            _now_ts  = time.time()
+                            _cutoff2 = _now_ts - _TWO_HOURS
+                            _ranking = []
+                            for _a in ASSETS:
+                                _recent = [e for e in asset_log[_a] if e["ts"] >= _cutoff2]
+                                _n = len(_recent)
+                                if _n == 0: continue
+                                _wr2 = sum(1 for e in _recent if e["won"]) / _n
+                                _ranking.append((_a, _wr2, _n))
+                            _ranking.sort(key=lambda x: (-x[1], -x[2]))
+                            _best_now, _best_wr2, _best_n2 = _best_asset()
+                            ss.log("📊 RANKING ÚLTIMAS 2H:", "info")
+                            for _rank_i, (_ra, _rwr, _rn) in enumerate(_ranking):
+                                _star = " 🎯 OPERANDO" if _ra == _best_now else ""
+                                _lbl  = "🟢" if _rwr >= 0.55 else ("🟡" if _rwr >= 0.45 else "🔴")
+                                ss.log(
+                                    f"  {_lbl} {ASSET_NAMES.get(_ra,_ra)}: "
+                                    f"{_rwr*100:.0f}% ({_rn} ops){_star}",
+                                    "info"
+                                )
+                            if not _ranking:
+                                ss.log("  ⏳ Aquecimento: coletando dados de todos os ativos…", "info")
                             # Log do aprendizado adaptativo por ativo
                             for _a, _p in perf.items():
                                 if not _p["hist"]: continue
                                 _wr  = sum(_p["hist"]) / len(_p["hist"])
                                 _adj = _p["conf_adj"]
-                                _lbl = "🟢" if _wr >= 0.60 else ("🟡" if _wr >= 0.45 else "🔴")
                                 ss.log(
                                     f"🧠 {ASSET_NAMES.get(_a,_a)}: "
-                                    f"acerto {_wr*100:.0f}% ({len(_p['hist'])} ops) | "
                                     f"threshold adj {_adj:+.2f}",
                                     "info"
                                 )
@@ -929,13 +985,13 @@ async def _deriv_bot_async(ss: SessionState, token: str, valor_brl: float,
                         if now - last_trade[asset] < cooldown:
                             continue
 
-                        # ── Seleção dinâmica: evitar ativos com performance ruim ──
-                        hist = perf[asset]["hist"]
-                        if len(hist) >= 6:
-                            recent_wr = sum(hist[-6:]) / 6
-                            if recent_wr < 0.30:
-                                # Ativo com taxa < 30% nas últimas 6 ops → pular
-                                continue
+                        # ── Seleção dinâmica: só opera o melhor ativo das últimas 2h ──
+                        best_a, best_wr, best_n = _best_asset()
+                        if best_a is not None and asset != best_a:
+                            # Existe um líder claro — ignorar todos os outros
+                            continue
+                        # Se best_a is None (dados insuficientes), libera todos os ativos
+                        # para as primeiras operações do dia (fase de aquecimento)
 
                         # ── Filtro de velocidade de tick (mercado ativo) ────
                         tick_speed = len(tick_times[asset])  # ticks/min últimos 60s
