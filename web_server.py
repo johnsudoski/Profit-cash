@@ -337,100 +337,246 @@ def calc_stoch(prices: list, k_period: int = 14, d_period: int = 3):
     return k_now, d_now
 
 
+def calc_williams_r(prices: list, period: int = 14) -> float:
+    """Williams %R — overbought > -20, oversold < -80."""
+    if len(prices) < period:
+        return -50.0
+    window = prices[-period:]
+    hi, lo = max(window), min(window)
+    if hi == lo:
+        return -50.0
+    return -100.0 * (hi - prices[-1]) / (hi - lo)
+
+
+def calc_cci(prices: list, period: int = 20) -> float:
+    """Commodity Channel Index — overbought > +100, oversold < -100."""
+    if len(prices) < period:
+        return 0.0
+    window   = prices[-period:]
+    mean_tp  = sum(window) / period
+    mean_dev = sum(abs(p - mean_tp) for p in window) / period
+    if mean_dev == 0:
+        return 0.0
+    return (window[-1] - mean_tp) / (0.015 * mean_dev)
+
+
+def calc_atr(prices: list, period: int = 14) -> float:
+    """ATR simplificado (só close, sem high/low separados) — mede volatilidade relativa."""
+    if len(prices) < period + 1:
+        return 0.0
+    trs = [abs(prices[i] - prices[i - 1]) for i in range(1, len(prices))]
+    atr = sum(trs[:period]) / period
+    for tr in trs[period:]:
+        atr = (atr * (period - 1) + tr) / period
+    return atr
+
+
+def detect_rsi_divergence(prices: list, period: int = 14) -> str | None:
+    """
+    Divergência entre preço e RSI (janela de 15 ticks).
+    Retorna 'bullish' (sinal de CALL), 'bearish' (sinal de PUT) ou None.
+    """
+    if len(prices) < period + 20:
+        return None
+    rsi_now  = calc_rsi(prices,       period)
+    rsi_old  = calc_rsi(prices[:-15], period)
+    price_now = prices[-1]
+    price_old = prices[-16]
+    # Bullish divergence: preço caiu, RSI subiu → impulso de reversão CALL
+    if price_now < price_old and rsi_now > rsi_old + 5:
+        return "bullish"
+    # Bearish divergence: preço subiu, RSI caiu → impulso de reversão PUT
+    if price_now > price_old and rsi_now < rsi_old - 5:
+        return "bearish"
+    return None
+
+
+# ── Log de operações (trade journal) ────────────────────────────────────────
+_LOG_DIR = os.path.join(BASE_DIR, "logs")
+try:
+    os.makedirs(_LOG_DIR, exist_ok=True)
+except Exception:
+    pass
+_TRADE_LOG = os.path.join(_LOG_DIR, "trades.jsonl")
+
+
+def _log_trade(entry: dict):
+    """Grava registro JSONL em logs/trades.jsonl para auditoria/backtesting."""
+    try:
+        with open(_TRADE_LOG, "a", encoding="utf-8") as f:
+            f.write(json.dumps(entry, default=str) + "\n")
+    except Exception:
+        pass
+
+
 def calc_signal(prices: list, config: dict):
     """
-    Sinal v3 — Reversão confirmada (4 filtros):
+    Sinal v4 — Multi-timeframe + 8 filtros expandidos:
 
-      FILTRO 1 — RSI REVERSÃO (obrigatório, +0.40)
-        Não basta RSI estar extremo — ele precisa ter PICADO e estar VIRANDO.
-        • PUT: RSI estava acima do limite em t-2 e t-1, e agora caiu (peak confirmado)
-        • CALL: RSI estava abaixo do limite em t-2 e t-1, e agora subiu (bottom confirmado)
+    OBRIGATÓRIOS (sem eles, não opera):
+      F1: RSI Reversão (janela curta 50 ticks)
+      F2: BB Band Touch (preço na banda)
+      F2b: BB Squeeze blocker (não opera quando bandas estão muito apertadas)
+      F3: EMA 50/100 macro trend (veta se fortemente contra a tendência)
 
-      FILTRO 2 — Bollinger Bands (obrigatório, +0.25)
-        Preço DEVE estar tocando a banda. Se não estiver, não há extremo real.
+    PONTUAÇÃO (acumula confiança):
+      RSI Reversão:          +0.22
+      BB Touch:              +0.12
+      EMA 50/100 a favor:    +0.10
+      Williams %R:           +0.12
+      CCI:                   +0.10
+      Stochastic %K/%D:      +0.12
+      RSI Divergência:       +0.12
+      EMA 9/21 curto prazo:  +0.08
+      Acordo multi-TF:       +0.10
 
-      FILTRO 3 — Stochastic %K/%D (confirmação, +0.20)
-        %K e %D acima de 80 (overbought) para PUT, abaixo de 20 para CALL.
-
-      FILTRO 4 — EMA 9/21 direção (+0.15)
-        Confirmação de tendência de curto prazo.
-
-    Confiança máxima: 1.00
-    Filtros 1 e 2 são OBRIGATÓRIOS — sem eles não opera.
+    Total máximo: 1.08 → cap em 1.00
     """
-    # Precisa de dados suficientes para RSI em t, t-1, t-2 + Stoch
     if len(prices) < 35:
         return None, 0.0, "", []
 
-    # RSI em 3 momentos para detectar reversão
-    rsi_now  = calc_rsi(prices,      14)
-    rsi_prev = calc_rsi(prices[:-1], 14)
-    rsi_2ago = calc_rsi(prices[:-2], 14)
+    # Janelas: curta (últimos 50) e longa (últimos 200 ou todos disponíveis)
+    p_short = prices[-50:]
+    p_long  = prices[-200:] if len(prices) >= 100 else prices
 
-    ema_fast           = calc_ema(prices, 9)
-    ema_slow           = calc_ema(prices, 21)
-    _, bb_upper, bb_lower = calc_bb(prices, 20, 2.0)
-    stoch_k, stoch_d   = calc_stoch(prices, 14, 3)
-    price_now          = prices[-1]
+    # ── Indicadores curto prazo ───────────────────────────────────────────────
+    rsi_now  = calc_rsi(p_short,      14)
+    rsi_prev = calc_rsi(p_short[:-1], 14)
+    rsi_2ago = calc_rsi(p_short[:-2], 14)
+
+    ema_fast          = calc_ema(p_short, 9)
+    ema_slow          = calc_ema(p_short, 21)
+    _, bb_upper, bb_lower = calc_bb(p_short, 20, 2.0)
+    stoch_k, stoch_d  = calc_stoch(p_short, 14, 3)
+    wpr               = calc_williams_r(p_short, 14)
+    cci               = calc_cci(p_short, 20)
+    price_now         = prices[-1]
+
+    # ── Indicadores longo prazo (opcional) ───────────────────────────────────
+    ema_50  = calc_ema(p_long, 50)  if len(p_long) >= 50  else None
+    ema_100 = calc_ema(p_long, 100) if len(p_long) >= 100 else None
+
+    # RSI na janela longa (para acordo multi-TF)
+    rsi_long_now  = calc_rsi(p_long,      14) if len(p_long) >= 15 else rsi_now
+    rsi_long_prev = calc_rsi(p_long[:-1], 14) if len(p_long) >= 16 else rsi_prev
+    rsi_long_2ago = calc_rsi(p_long[:-2], 14) if len(p_long) >= 17 else rsi_2ago
 
     direction = None
     conf      = 0.0
     motivo    = ""
     votos     = []
 
-    # ── FILTRO 1: RSI REVERSÃO (obrigatório) ──────────────────────────────────
-    # PUT: RSI estava acima do limite e agora está caindo
-    put_rsi_peak  = (rsi_2ago >= config["rsi_upper"] and
-                     rsi_prev  >= config["rsi_upper"] and
-                     rsi_now   <  rsi_prev)
-    # CALL: RSI estava abaixo do limite e agora está subindo
+    # ── F1: RSI REVERSÃO (obrigatório) ───────────────────────────────────────
+    put_rsi_peak    = (rsi_2ago >= config["rsi_upper"] and
+                       rsi_prev  >= config["rsi_upper"] and
+                       rsi_now   <  rsi_prev)
     call_rsi_bottom = (rsi_2ago <= config["rsi_lower"] and
                        rsi_prev  <= config["rsi_lower"] and
                        rsi_now   >  rsi_prev)
 
     if put_rsi_peak:
         direction = "PUT"
-        conf     += 0.40
-        motivo    = f"RSI reverteu de {rsi_prev:.1f}→{rsi_now:.1f} (pico confirmado)"
+        conf     += 0.22
+        motivo    = f"RSI reverteu {rsi_prev:.1f}→{rsi_now:.1f} (pico confirmado)"
         votos.append(f"RSI↓ {rsi_now:.0f}")
     elif call_rsi_bottom:
         direction = "CALL"
-        conf     += 0.40
-        motivo    = f"RSI reverteu de {rsi_prev:.1f}→{rsi_now:.1f} (fundo confirmado)"
+        conf     += 0.22
+        motivo    = f"RSI reverteu {rsi_prev:.1f}→{rsi_now:.1f} (fundo confirmado)"
         votos.append(f"RSI↑ {rsi_now:.0f}")
     else:
-        return None, 0.0, "", []  # sem reversão confirmada → não opera
-
-    # ── FILTRO 2: BOLLINGER BANDS (obrigatório) ───────────────────────────────
-    if bb_upper is None or bb_lower is None:
-        return None, 0.0, "", []  # dados insuficientes
-
-    bb_range   = bb_upper - bb_lower
-    bb_margin  = bb_range * 0.05          # 5% de tolerância na banda
-
-    if direction == "CALL" and price_now <= (bb_lower + bb_margin):
-        conf += 0.25; votos.append("BB banda ↓ ✓")
-    elif direction == "PUT" and price_now >= (bb_upper - bb_margin):
-        conf += 0.25; votos.append("BB banda ↑ ✓")
-    else:
-        # Preço não está na banda — sinal fraco, não opera
         return None, 0.0, "", []
 
-    # ── FILTRO 3: STOCHASTIC (+0.20) ──────────────────────────────────────────
+    # ── F2: BOLLINGER BANDS (obrigatório) ────────────────────────────────────
+    if bb_upper is None or bb_lower is None:
+        return None, 0.0, "", []
+
+    bb_range  = bb_upper - bb_lower
+    bb_mid    = (bb_upper + bb_lower) / 2.0
+    bb_margin = bb_range * 0.05
+
+    # F2b: BB Squeeze — bandas muito apertadas = sem direcionalidade, não opera
+    if bb_mid > 0 and (bb_range / bb_mid) < 0.0008:
+        return None, 0.0, "", []
+
+    if direction == "CALL" and price_now <= (bb_lower + bb_margin):
+        conf += 0.12; votos.append("BB↓ ✓")
+    elif direction == "PUT" and price_now >= (bb_upper - bb_margin):
+        conf += 0.12; votos.append("BB↑ ✓")
+    else:
+        return None, 0.0, "", []
+
+    # ── F3: EMA 50/100 MACRO TREND (veta se fortemente contra) ──────────────
+    if ema_50 and ema_100 and ema_100 > 0:
+        ema_diff_pct = abs(ema_50 - ema_100) / ema_100 * 100.0
+        macro_bull   = ema_50 > ema_100
+        macro_bear   = ema_50 < ema_100
+        if direction == "CALL" and macro_bear and ema_diff_pct > 0.05:
+            return None, 0.0, "", []  # tendência macro baixista — veta CALL
+        if direction == "PUT" and macro_bull and ema_diff_pct > 0.05:
+            return None, 0.0, "", []  # tendência macro altista — veta PUT
+        if direction == "CALL" and macro_bull:
+            conf += 0.10; votos.append("EMA50/100↑")
+        elif direction == "PUT" and macro_bear:
+            conf += 0.10; votos.append("EMA50/100↓")
+        else:
+            votos.append("EMA50/100✗")
+
+    # ── F4: WILLIAMS %R ──────────────────────────────────────────────────────
+    if direction == "CALL" and wpr < -80:
+        conf += 0.12; votos.append(f"W%R {wpr:.0f}")
+    elif direction == "PUT" and wpr > -20:
+        conf += 0.12; votos.append(f"W%R {wpr:.0f}")
+    else:
+        votos.append(f"W%R✗ {wpr:.0f}")
+
+    # ── F5: CCI ──────────────────────────────────────────────────────────────
+    if direction == "CALL" and cci < -100:
+        conf += 0.10; votos.append(f"CCI {cci:.0f}")
+    elif direction == "PUT" and cci > 100:
+        conf += 0.10; votos.append(f"CCI {cci:.0f}")
+    else:
+        votos.append(f"CCI✗ {cci:.0f}")
+
+    # ── F6: STOCHASTIC ───────────────────────────────────────────────────────
     if direction == "CALL" and stoch_k < 25 and stoch_d < 30:
-        conf += 0.20; votos.append(f"STOCH↑ {stoch_k:.0f}")
+        conf += 0.12; votos.append(f"STOCH↑ {stoch_k:.0f}")
     elif direction == "PUT" and stoch_k > 75 and stoch_d > 70:
-        conf += 0.20; votos.append(f"STOCH↓ {stoch_k:.0f}")
+        conf += 0.12; votos.append(f"STOCH↓ {stoch_k:.0f}")
     else:
         votos.append(f"STOCH✗ {stoch_k:.0f}")
 
-    # ── FILTRO 4: EMA 9/21 (+0.15) ────────────────────────────────────────────
-    if direction == "CALL" and ema_fast > ema_slow:
-        conf += 0.15; votos.append("EMA ↑")
-    elif direction == "PUT" and ema_fast < ema_slow:
-        conf += 0.15; votos.append("EMA ↓")
+    # ── F7: RSI DIVERGÊNCIA ──────────────────────────────────────────────────
+    div = detect_rsi_divergence(p_short)
+    if direction == "CALL" and div == "bullish":
+        conf += 0.12; votos.append("DIV↑")
+    elif direction == "PUT" and div == "bearish":
+        conf += 0.12; votos.append("DIV↓")
     else:
-        votos.append("EMA ✗")
+        votos.append("DIV✗")
+
+    # ── F8: EMA 9/21 curto prazo ─────────────────────────────────────────────
+    if direction == "CALL" and ema_fast > ema_slow:
+        conf += 0.08; votos.append("EMA9/21↑")
+    elif direction == "PUT" and ema_fast < ema_slow:
+        conf += 0.08; votos.append("EMA9/21↓")
+    else:
+        votos.append("EMA9/21✗")
+
+    # ── F9: ACORDO MULTI-TIMEFRAME ────────────────────────────────────────────
+    # Verifica se a janela longa também está em reversão
+    put_long  = (rsi_long_2ago >= config["rsi_upper"] and
+                 rsi_long_prev  >= config["rsi_upper"] and
+                 rsi_long_now   <  rsi_long_prev)
+    call_long = (rsi_long_2ago <= config["rsi_lower"] and
+                 rsi_long_prev  <= config["rsi_lower"] and
+                 rsi_long_now   >  rsi_long_prev)
+    if direction == "PUT"  and put_long:
+        conf += 0.10; votos.append("MTF↓")
+    elif direction == "CALL" and call_long:
+        conf += 0.10; votos.append("MTF↑")
+    else:
+        votos.append("MTF✗")
 
     return direction, max(0.0, min(1.0, conf)), motivo, votos
 
@@ -454,7 +600,7 @@ async def _deriv_bot_async(ss: SessionState, token: str, valor_brl: float,
     wins = losses = 0
     tick_buf    = {a: [] for a in ASSETS}
     last_trade  = {a: 0.0 for a in ASSETS}
-    active_cx   = {}   # contract_id -> {tid, buy_price}
+    active_cx   = {}   # contract_id -> {tid, buy_price, ...}
     pending_p   = {}   # req_id (int) -> {asset, direction, conf, motivo}
     req_ctr     = [0]  # inteiro mutable via lista (closure)
     trade_count = 0
@@ -466,9 +612,15 @@ async def _deriv_bot_async(ss: SessionState, token: str, valor_brl: float,
     # hist: últimos 20 resultados (1=WIN, 0=LOSS)
     # conf_adj: ajuste dinâmico no threshold de confiança (-0.05 a +0.20)
     # pause_until: timestamp até quando o ativo está pausado por losses seguidos
-    perf = {a: {"hist": [], "conf_adj": 0.0, "pause_until": 0.0} for a in ASSETS}
+    # last_result: 1=WIN, 0=LOSS, None=sem histórico (para cooldown adaptativo)
+    perf = {a: {"hist": [], "conf_adj": 0.0, "pause_until": 0.0, "last_result": None}
+            for a in ASSETS}
     # Histórico global em ordem cronológica (para stop por sequência)
     global_hist = []   # lista de 1/0 na ordem em que as operações fecharam
+    # ── Dupla confirmação: sinal precisa aparecer 2x antes de abrir operação ──
+    pending_signal = {a: None for a in ASSETS}  # {direction, conf, motivo, votos, ts}
+    # ── Tick speed: rastreia velocidade dos ticks (atividade do mercado) ──────
+    tick_times = {a: [] for a in ASSETS}
 
     ss.log("Conectando à Deriv…", "info")
     ss.update_estado(rodando=True)
@@ -613,9 +765,22 @@ async def _deriv_bot_async(ss: SessionState, token: str, valor_brl: float,
                         ss.log(f"❌ LOSS −R${loss_brl:.2f} | {direction_cx} {entry_price:.5g}→{exit_price:.5g}", "loss")
                         ss.resultado(tid, "L", -bp, lucro_brl=-loss_brl)
                     ss.update_estado(wins=wins, losses=losses, lucro=lucro_total)
+                    # ── Gravar no trade journal ───────────────────────────
+                    _log_trade({
+                        "ts":         datetime.utcnow().isoformat(),
+                        "event":      "close",
+                        "trade_id":   tid,
+                        "asset":      asset_cx,
+                        "direction":  direction_cx,
+                        "entry":      entry_price,
+                        "exit":       exit_price,
+                        "result":     "WIN" if won else "LOSS",
+                        "profit_brl": round((payout_est - bp if won else -bp) * rate_brl, 2),
+                    })
                     # ── Aprendizado adaptativo ────────────────────────────
                     # Registra resultado por ativo para ajustar threshold
                     perf[asset_cx]["hist"].append(1 if won else 0)
+                    perf[asset_cx]["last_result"] = 1 if won else 0
                     if len(perf[asset_cx]["hist"]) > 20:
                         perf[asset_cx]["hist"] = perf[asset_cx]["hist"][-20:]
                     recent_hist = perf[asset_cx]["hist"]
@@ -691,8 +856,12 @@ async def _deriv_bot_async(ss: SessionState, token: str, valor_brl: float,
                         if asset not in tick_buf:
                             continue
                         tick_buf[asset].append(price)
-                        if len(tick_buf[asset]) > 200:
-                            tick_buf[asset] = tick_buf[asset][-200:]
+                        if len(tick_buf[asset]) > 500:
+                            tick_buf[asset] = tick_buf[asset][-500:]
+                        # ── Rastrear velocidade dos ticks (últimos 60s) ────
+                        _tnow = time.time()
+                        tick_times[asset].append(_tnow)
+                        tick_times[asset] = [t for t in tick_times[asset] if _tnow - t <= 60]
 
                         # ── Liquidar contratos expirados a cada tick ────────
                         now = time.time()
@@ -735,24 +904,88 @@ async def _deriv_bot_async(ss: SessionState, token: str, valor_brl: float,
                         # ── Uma operação de cada vez ───────────────────────
                         # Só abre nova trade se não há contrato ativo nem proposta pendente
                         if active_cx or pending_p or pending_buy:
+                            # Limpar sinais pendentes expirados enquanto há trade aberta
+                            for _a in list(pending_signal):
+                                ps = pending_signal[_a]
+                                if ps and (now - ps["ts"]) > 120:
+                                    pending_signal[_a] = None
                             continue
 
                         # ── Pausa adaptativa por ativo ──────────────────────
                         if now < perf[asset].get("pause_until", 0):
                             continue
 
-                        cooldown = config["duracao"] * 60 + 15
+                        # ── Cooldown adaptativo (mais curto após LOSS, mais longo após WIN)
+                        base_cooldown = config["duracao"] * 60
+                        last_res = perf[asset].get("last_result")
+                        if last_res == 0:
+                            # Após LOSS: retorna mais rápido para buscar recuperação
+                            cooldown = base_cooldown + 5
+                        elif last_res == 1:
+                            # Após WIN: mais cauteloso, espera mais
+                            cooldown = base_cooldown + 45
+                        else:
+                            cooldown = base_cooldown + 15
                         if now - last_trade[asset] < cooldown:
+                            continue
+
+                        # ── Seleção dinâmica: evitar ativos com performance ruim ──
+                        hist = perf[asset]["hist"]
+                        if len(hist) >= 6:
+                            recent_wr = sum(hist[-6:]) / 6
+                            if recent_wr < 0.30:
+                                # Ativo com taxa < 30% nas últimas 6 ops → pular
+                                continue
+
+                        # ── Filtro de velocidade de tick (mercado ativo) ────
+                        tick_speed = len(tick_times[asset])  # ticks/min últimos 60s
+                        if tick_speed < 3:
+                            # Mercado sem atividade suficiente para análise confiável
                             continue
 
                         direction, conf, motivo, votos = calc_signal(tick_buf[asset], config)
                         # Threshold adaptativo: base + ajuste aprendido para este ativo
                         conf_threshold = config["conf_min"] + perf[asset]["conf_adj"]
+
                         if direction and conf >= conf_threshold:
-                            aname = ASSET_NAMES.get(asset, asset)
-                            ss.sinal(aname, direction, conf, motivo, votos)
-                            last_trade[asset] = now
-                            await request_proposal(asset, direction, conf, motivo)
+                            ps = pending_signal.get(asset)
+                            if ps and ps["direction"] == direction and (now - ps["ts"]) < 90:
+                                # ── Segunda confirmação: sinal repetido em <90s → OPERA ──
+                                aname = ASSET_NAMES.get(asset, asset)
+                                ss.sinal(aname, direction, conf, motivo, votos)
+                                ss.log(f"✅ Dupla confirmação: {direction} {aname} "
+                                       f"(conf {conf:.2f}, tick/min {tick_speed})", "info")
+                                # Gravar sinal no journal antes de enviar proposta
+                                _log_trade({
+                                    "ts":        datetime.utcnow().isoformat(),
+                                    "event":     "signal",
+                                    "asset":     asset,
+                                    "direction": direction,
+                                    "conf":      round(conf, 4),
+                                    "votos":     votos,
+                                    "tick_speed": tick_speed,
+                                    "price":     tick_buf[asset][-1],
+                                })
+                                last_trade[asset]    = now
+                                pending_signal[asset] = None
+                                await request_proposal(asset, direction, conf, motivo)
+                            else:
+                                # ── Primeira vez: armazenar e aguardar confirmação ──
+                                pending_signal[asset] = {
+                                    "direction": direction, "conf": conf,
+                                    "motivo": motivo, "votos": votos, "ts": now,
+                                }
+                                aname = ASSET_NAMES.get(asset, asset)
+                                ss.log(
+                                    f"⏳ {aname}: sinal {direction} detectado "
+                                    f"(conf {conf:.2f}) — aguardando confirmação…",
+                                    "info"
+                                )
+                        else:
+                            # Sinal não bateu threshold ou mudou → limpar pendente
+                            ps = pending_signal.get(asset)
+                            if ps and (now - ps["ts"]) > 90:
+                                pending_signal[asset] = None
                         continue
 
                     # ── PROPOSTA RECEBIDA ─────────────────────────────────
