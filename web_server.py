@@ -53,11 +53,11 @@ ASSET_NAMES = {
     "R_10":  "Volatility 10",
 }
 STRATEGIES = {
-    # stop_diario_pct: para o robô se a perda acumulada passar X% do saldo inicial
+    # duracao: em SEGUNDOS (duracao_unit: "s")
     # rsi_upper/lower mais extremos = menos operações, mais qualidade
-    "cautelosa": {"duracao": 5, "rsi_upper": 75, "rsi_lower": 25, "conf_min": 0.78, "stop_diario_pct": 0.15},
-    "moderada":  {"duracao": 3, "rsi_upper": 70, "rsi_lower": 30, "conf_min": 0.70, "stop_diario_pct": 0.25},
-    "agressiva": {"duracao": 1, "rsi_upper": 65, "rsi_lower": 35, "conf_min": 0.62, "stop_diario_pct": 0.35},
+    "cautelosa": {"duracao": 5, "duracao_unit": "s", "rsi_upper": 75, "rsi_lower": 25, "conf_min": 0.78, "stop_diario_pct": 0.15},
+    "moderada":  {"duracao": 5, "duracao_unit": "s", "rsi_upper": 70, "rsi_lower": 30, "conf_min": 0.70, "stop_diario_pct": 0.25},
+    "agressiva": {"duracao": 5, "duracao_unit": "s", "rsi_upper": 65, "rsi_lower": 35, "conf_min": 0.62, "stop_diario_pct": 0.35},
 }
 
 
@@ -749,13 +749,13 @@ async def _deriv_bot_async(ss: SessionState, token: str, valor_brl: float,
                     }
                     await dws.send(json.dumps({
                         "proposal":       1,
-                        "req_id":         rid,          # inteiro
+                        "req_id":         rid,
                         "amount":         stake,
                         "basis":          "stake",
                         "contract_type":  direction,    # "CALL" ou "PUT"
                         "currency":       currency,
                         "duration":       config["duracao"],
-                        "duration_unit":  "m",
+                        "duration_unit":  config.get("duracao_unit", "s"),
                         "symbol":         asset,
                     }))
                     aname = ASSET_NAMES.get(asset, asset)
@@ -961,9 +961,10 @@ async def _deriv_bot_async(ss: SessionState, token: str, valor_brl: float,
                         # Só abre nova trade se não há contrato ativo nem proposta pendente
                         if active_cx or pending_p or pending_buy:
                             # Limpar sinais pendentes expirados enquanto há trade aberta
+                            _exp = 20 if config.get("duracao_unit") == "s" else 120
                             for _a in list(pending_signal):
                                 ps = pending_signal[_a]
-                                if ps and (now - ps["ts"]) > 120:
+                                if ps and (now - ps["ts"]) > _exp:
                                     pending_signal[_a] = None
                             continue
 
@@ -971,17 +972,20 @@ async def _deriv_bot_async(ss: SessionState, token: str, valor_brl: float,
                         if now < perf[asset].get("pause_until", 0):
                             continue
 
-                        # ── Cooldown adaptativo (mais curto após LOSS, mais longo após WIN)
-                        base_cooldown = config["duracao"] * 60
+                        # ── Cooldown adaptativo ──────────────────────────────
+                        # Para trades em segundos: base = duração + buffer mínimo
+                        # Para trades em minutos: base = duração × 60 + buffer
+                        if config.get("duracao_unit") == "s":
+                            base_cooldown = config["duracao"] + 5   # ex: 5s trade → 10s base
+                        else:
+                            base_cooldown = config["duracao"] * 60
                         last_res = perf[asset].get("last_result")
                         if last_res == 0:
-                            # Após LOSS: retorna mais rápido para buscar recuperação
-                            cooldown = base_cooldown + 5
+                            cooldown = base_cooldown       # após LOSS: volta rápido
                         elif last_res == 1:
-                            # Após WIN: mais cauteloso, espera mais
-                            cooldown = base_cooldown + 45
+                            cooldown = base_cooldown + 10  # após WIN: 10s extra de cautela
                         else:
-                            cooldown = base_cooldown + 15
+                            cooldown = base_cooldown + 5
                         if now - last_trade[asset] < cooldown:
                             continue
 
@@ -1003,10 +1007,13 @@ async def _deriv_bot_async(ss: SessionState, token: str, valor_brl: float,
                         # Threshold adaptativo: base + ajuste aprendido para este ativo
                         conf_threshold = config["conf_min"] + perf[asset]["conf_adj"]
 
+                        # Janela de confirmação: 15s para trades de 5s, 90s para minutos
+                        _confirm_window = 15 if config.get("duracao_unit") == "s" else 90
+
                         if direction and conf >= conf_threshold:
                             ps = pending_signal.get(asset)
-                            if ps and ps["direction"] == direction and (now - ps["ts"]) < 90:
-                                # ── Segunda confirmação: sinal repetido em <90s → OPERA ──
+                            if ps and ps["direction"] == direction and (now - ps["ts"]) < _confirm_window:
+                                # ── Segunda confirmação: sinal repetido → OPERA ──
                                 aname = ASSET_NAMES.get(asset, asset)
                                 ss.sinal(aname, direction, conf, motivo, votos)
                                 ss.log(f"✅ Dupla confirmação: {direction} {aname} "
@@ -1038,9 +1045,9 @@ async def _deriv_bot_async(ss: SessionState, token: str, valor_brl: float,
                                     "info"
                                 )
                         else:
-                            # Sinal não bateu threshold ou mudou → limpar pendente
+                            # Sinal não bateu threshold ou mudou → limpar pendente expirado
                             ps = pending_signal.get(asset)
-                            if ps and (now - ps["ts"]) > 90:
+                            if ps and (now - ps["ts"]) > _confirm_window:
                                 pending_signal[asset] = None
                         continue
 
@@ -1111,7 +1118,9 @@ async def _deriv_bot_async(ss: SessionState, token: str, valor_brl: float,
                             direction_cx= binfo.get("direction", "CALL")
                             payout_cx   = binfo.get("expected_payout", bp * 1.85)
                             entry_price = tick_buf.get(asset_cx, [0])[-1] if tick_buf.get(asset_cx) else 0
-                            expires_at  = time.time() + config["duracao"] * 60 + 20
+                            _dur_secs   = (config["duracao"] if config.get("duracao_unit") == "s"
+                                           else config["duracao"] * 60)
+                            expires_at  = time.time() + _dur_secs + 8  # +8s buffer para liquidação
                             tid = f"T{trade_count}"
                             active_cx[cid] = {
                                 "tid": tid, "buy_price": bp,
