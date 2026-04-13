@@ -53,11 +53,12 @@ ASSET_NAMES = {
     "R_10":  "Volatility 10",
 }
 STRATEGIES = {
-    # duracao: em SEGUNDOS (duracao_unit: "s")
-    # rsi_upper/lower mais extremos = menos operações, mais qualidade
-    "cautelosa": {"duracao": 5, "duracao_unit": "s", "rsi_upper": 75, "rsi_lower": 25, "conf_min": 0.78, "stop_diario_pct": 0.15},
-    "moderada":  {"duracao": 5, "duracao_unit": "s", "rsi_upper": 70, "rsi_lower": 30, "conf_min": 0.70, "stop_diario_pct": 0.25},
-    "agressiva": {"duracao": 5, "duracao_unit": "s", "rsi_upper": 65, "rsi_lower": 35, "conf_min": 0.62, "stop_diario_pct": 0.35},
+    # duracao: em TICKS (duracao_unit: "t")
+    # 5 ticks ≈ 5 segundos nos índices sintéticos da Deriv
+    # Deriv não aceita duration_unit "s" < 15s — ticks é o menor contrato disponível
+    "cautelosa": {"duracao": 5, "duracao_unit": "t", "rsi_upper": 75, "rsi_lower": 25, "conf_min": 0.78, "stop_diario_pct": 0.15},
+    "moderada":  {"duracao": 5, "duracao_unit": "t", "rsi_upper": 70, "rsi_lower": 30, "conf_min": 0.70, "stop_diario_pct": 0.25},
+    "agressiva": {"duracao": 5, "duracao_unit": "t", "rsi_upper": 65, "rsi_lower": 35, "conf_min": 0.62, "stop_diario_pct": 0.35},
 }
 
 
@@ -961,7 +962,7 @@ async def _deriv_bot_async(ss: SessionState, token: str, valor_brl: float,
                         # Só abre nova trade se não há contrato ativo nem proposta pendente
                         if active_cx or pending_p or pending_buy:
                             # Limpar sinais pendentes expirados enquanto há trade aberta
-                            _exp = 20 if config.get("duracao_unit") == "s" else 120
+                            _exp = 20 if config.get("duracao_unit") in ("t", "s") else 120
                             for _a in list(pending_signal):
                                 ps = pending_signal[_a]
                                 if ps and (now - ps["ts"]) > _exp:
@@ -973,10 +974,11 @@ async def _deriv_bot_async(ss: SessionState, token: str, valor_brl: float,
                             continue
 
                         # ── Cooldown adaptativo ──────────────────────────────
-                        # Para trades em segundos: base = duração + buffer mínimo
-                        # Para trades em minutos: base = duração × 60 + buffer
-                        if config.get("duracao_unit") == "s":
-                            base_cooldown = config["duracao"] + 5   # ex: 5s trade → 10s base
+                        _unit = config.get("duracao_unit", "t")
+                        if _unit == "t":
+                            base_cooldown = config["duracao"] + 5   # 5 ticks → ~10s base
+                        elif _unit == "s":
+                            base_cooldown = config["duracao"] + 5
                         else:
                             base_cooldown = config["duracao"] * 60
                         last_res = perf[asset].get("last_result")
@@ -1007,8 +1009,8 @@ async def _deriv_bot_async(ss: SessionState, token: str, valor_brl: float,
                         # Threshold adaptativo: base + ajuste aprendido para este ativo
                         conf_threshold = config["conf_min"] + perf[asset]["conf_adj"]
 
-                        # Janela de confirmação: 15s para trades de 5s, 90s para minutos
-                        _confirm_window = 15 if config.get("duracao_unit") == "s" else 90
+                        # Janela de confirmação: 15s para ticks/segundos, 90s para minutos
+                        _confirm_window = 15 if config.get("duracao_unit") in ("t", "s") else 90
 
                         if direction and conf >= conf_threshold:
                             ps = pending_signal.get(asset)
@@ -1118,8 +1120,13 @@ async def _deriv_bot_async(ss: SessionState, token: str, valor_brl: float,
                             direction_cx= binfo.get("direction", "CALL")
                             payout_cx   = binfo.get("expected_payout", bp * 1.85)
                             entry_price = tick_buf.get(asset_cx, [0])[-1] if tick_buf.get(asset_cx) else 0
-                            _dur_secs   = (config["duracao"] if config.get("duracao_unit") == "s"
-                                           else config["duracao"] * 60)
+                            _unit = config.get("duracao_unit", "t")
+                            if _unit == "t":
+                                _dur_secs = config["duracao"] * 1.5   # 5 ticks × ~1s + margem
+                            elif _unit == "s":
+                                _dur_secs = config["duracao"]
+                            else:
+                                _dur_secs = config["duracao"] * 60
                             expires_at  = time.time() + _dur_secs + 8  # +8s buffer para liquidação
                             tid = f"T{trade_count}"
                             active_cx[cid] = {
