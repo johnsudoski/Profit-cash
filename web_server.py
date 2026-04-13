@@ -57,8 +57,8 @@ STRATEGIES = {
     # 5 ticks ≈ 5 segundos nos índices sintéticos da Deriv
     # Deriv não aceita duration_unit "s" < 15s — ticks é o menor contrato disponível
     "cautelosa": {"duracao": 5, "duracao_unit": "t", "rsi_upper": 75, "rsi_lower": 25, "conf_min": 0.78, "stop_diario_pct": 0.15},
-    "moderada":  {"duracao": 5, "duracao_unit": "t", "rsi_upper": 70, "rsi_lower": 30, "conf_min": 0.70, "stop_diario_pct": 0.25},
-    "agressiva": {"duracao": 5, "duracao_unit": "t", "rsi_upper": 65, "rsi_lower": 35, "conf_min": 0.62, "stop_diario_pct": 0.35},
+    "moderada":  {"duracao": 5, "duracao_unit": "t", "rsi_upper": 70, "rsi_lower": 30, "conf_min": 0.70, "stop_diario_pct": 0.15},
+    "agressiva": {"duracao": 5, "duracao_unit": "t", "rsi_upper": 65, "rsi_lower": 35, "conf_min": 0.62, "stop_diario_pct": 0.15},
 }
 
 
@@ -1066,31 +1066,63 @@ async def _deriv_bot_async(ss: SessionState, token: str, valor_brl: float,
                         if tick_speed < 3:
                             continue  # mercado inativo
 
+                        # ── Stop diário ─────────────────────────────────────
+                        _saldo_atual = ss.estado_snap.get("saldo", saldo0)
+                        if saldo0 > 0:
+                            _perda_pct = (saldo0 - _saldo_atual) / saldo0
+                            if _perda_pct >= config["stop_diario_pct"]:
+                                ss.log(
+                                    f"🛑 STOP DIÁRIO: perdeu "
+                                    f"{_perda_pct*100:.1f}% do saldo inicial "
+                                    f"(limite {config['stop_diario_pct']*100:.0f}%). "
+                                    f"Robô pausado.",
+                                    "loss"
+                                )
+                                ss.stop_evt.set()
+                                break
+
                         # ════════════════════════════════════════════════════
-                        #  ESTRATÉGIA: VELA DE 5 MINUTOS + TRADES DE 5 TICKS
+                        #  ESTRATÉGIA: VELA FORTE + CONFIRMAÇÃO DE 5 TICKS
                         #
-                        #  1. Analisa a vela de 5 minutos atual
-                        #  2. Se a vela for forte (força ≥ 0.45), define direção
-                        #  3. Entra imediatamente nessa direção (sem dupla confirmação)
-                        #  4. Repete a cada 5 ticks enquanto a vela mantiver a direção
-                        #  5. Para se a vela inverter ou fechar
+                        #  ENTRADA CALL quando TODOS os 3 filtros passam:
+                        #    1. Vela 5min com corpo ≥ 60% do range (vela forte)
+                        #    2. Primeiros 70% do tempo da vela
+                        #    3. Últimos 5 ticks todos subindo consecutivamente
+                        #
+                        #  ENTRADA PUT: mesma lógica, ticks todos descendo
+                        #  DURAÇÃO: 5 ticks (~5 segundos)
                         # ════════════════════════════════════════════════════
                         candle = get_candle_5m(tick_history[asset])
 
                         if candle is None:
                             continue  # vela ainda sem dados suficientes
 
-                        # Não entrar nos últimos 10% da vela (últimos ~30s)
-                        # Evita operações que terminam depois que a vela fecha
-                        if candle["time_pct"] > 0.90:
+                        # Filtro 1: Vela forte — corpo ≥ 60% do range total
+                        if candle["strength"] < 0.60:
                             continue
 
-                        # Vela fraca ou doji — sem direção clara
-                        if candle["strength"] < 0.45:
+                        # Filtro 2: Primeiros 70% do tempo da vela
+                        # Evita entrar no final quando a reversão é mais provável
+                        if candle["time_pct"] > 0.70:
                             continue
 
-                        direction = candle["direction"]
-                        # Confiança proporcional à força da vela: 0.55 (força 45%) → 0.95 (força 100%)
+                        # Filtro 3: Confirmação pelos últimos 5 ticks
+                        # CALL → 5 ticks consecutivos subindo (cada um maior que o anterior)
+                        # PUT  → 5 ticks consecutivos descendo (cada um menor que o anterior)
+                        _recent = tick_buf[asset][-6:]  # 6 preços = 5 movimentos
+                        if len(_recent) < 6:
+                            continue
+                        _ticks_up   = all(_recent[i] < _recent[i+1] for i in range(5))
+                        _ticks_down = all(_recent[i] > _recent[i+1] for i in range(5))
+
+                        candle_dir = candle["direction"]
+                        if candle_dir == "CALL" and not _ticks_up:
+                            continue   # vela de alta mas ticks não confirmam
+                        if candle_dir == "PUT" and not _ticks_down:
+                            continue   # vela de baixa mas ticks não confirmam
+
+                        direction = candle_dir
+                        # Confiança: 0.60 (força 60%) → 0.95 (força 100%)
                         conf = min(1.0, 0.55 + candle["strength"] * 0.40)
 
                         conf_threshold = config["conf_min"] + perf[asset]["conf_adj"]
@@ -1098,24 +1130,27 @@ async def _deriv_bot_async(ss: SessionState, token: str, valor_brl: float,
                             continue
 
                         aname  = ASSET_NAMES.get(asset, asset)
+                        _arrows = "↑↑↑↑↑" if direction == "CALL" else "↓↓↓↓↓"
                         motivo = (f"Vela 5m {'alta' if direction=='CALL' else 'baixa'}: "
                                   f"força {candle['strength']*100:.0f}% | "
-                                  f"{candle['ticks']} ticks | "
+                                  f"5 ticks {_arrows} | "
                                   f"{candle['time_pct']*100:.0f}% do período")
                         votos  = [
                             f"Vela{'↑' if direction=='CALL' else '↓'} {candle['strength']*100:.0f}%",
+                            f"5 ticks {'subindo' if direction=='CALL' else 'descendo'} {_arrows}",
                             f"O={candle['open']:.4g} C={candle['close']:.4g}",
                         ]
 
                         ss.sinal(aname, direction, conf, motivo, votos)
                         _log_trade({
-                            "ts":        datetime.utcnow().isoformat(),
-                            "event":     "signal",
-                            "asset":     asset,
-                            "direction": direction,
-                            "conf":      round(conf, 4),
+                            "ts":              datetime.utcnow().isoformat(),
+                            "event":           "signal",
+                            "asset":           asset,
+                            "direction":       direction,
+                            "conf":            round(conf, 4),
                             "candle_strength": round(candle["strength"], 3),
                             "candle_time_pct": round(candle["time_pct"], 2),
+                            "tick_confirm":    "up" if direction == "CALL" else "down",
                             "tick_speed":      tick_speed,
                             "price":           tick_buf[asset][-1],
                         })
