@@ -410,6 +410,61 @@ def _log_trade(entry: dict):
         pass
 
 
+def get_candle_5m(history: list) -> dict | None:
+    """
+    Reconstrói a vela de 5 minutos atual a partir do histórico de ticks.
+
+    history: lista de (price, timestamp) — mantida em tick_history[asset]
+
+    Retorna dict com:
+      direction  → "CALL" ou "PUT" (direção do corpo da vela)
+      strength   → 0.0–1.0  (corpo / range total — 0=doji, 1=vela perfeita)
+      open/close/high/low → preços OHLC da vela atual
+      ticks      → número de ticks na vela atual
+      time_pct   → 0.0–1.0 (quanto do período de 5min já passou)
+      momentum   → variação % do close em relação ao open
+    """
+    if not history:
+        return None
+
+    now         = time.time()
+    candle_start = now - (now % 300)   # início do período de 5min (floor ao múltiplo de 300s)
+
+    # Ticks pertencentes à vela atual
+    candle_prices = [p for p, t in history if t >= candle_start]
+
+    if len(candle_prices) < 8:
+        return None   # Vela nova demais — dados insuficientes
+
+    open_p  = candle_prices[0]
+    close_p = candle_prices[-1]
+    high_p  = max(candle_prices)
+    low_p   = min(candle_prices)
+
+    candle_range = high_p - low_p
+    body         = abs(close_p - open_p)
+
+    if candle_range == 0:
+        return None   # Sem movimento — não opera
+
+    strength  = body / candle_range        # corpo / range (0=doji, 1=vela forte)
+    direction = "CALL" if close_p >= open_p else "PUT"
+    time_pct  = min(1.0, (now - candle_start) / 300.0)
+    momentum  = (close_p - open_p) / open_p * 100 if open_p else 0.0
+
+    return {
+        "direction": direction,
+        "strength":  strength,
+        "open":      open_p,
+        "close":     close_p,
+        "high":      high_p,
+        "low":       low_p,
+        "ticks":     len(candle_prices),
+        "time_pct":  time_pct,
+        "momentum":  momentum,
+    }
+
+
 def calc_signal(prices: list, config: dict):
     """
     Sinal v4 — Multi-timeframe + 8 filtros expandidos:
@@ -622,6 +677,9 @@ async def _deriv_bot_async(ss: SessionState, token: str, valor_brl: float,
     pending_signal = {a: None for a in ASSETS}  # {direction, conf, motivo, votos, ts}
     # ── Tick speed: rastreia velocidade dos ticks (atividade do mercado) ──────
     tick_times = {a: [] for a in ASSETS}
+    # ── Histórico para reconstrução de vela de 5 minutos ─────────────────────
+    # Cada entrada: (price, timestamp) — mantido em sincronia com tick_buf
+    tick_history = {a: [] for a in ASSETS}
     # ── Ranking dinâmico: histórico com timestamp para calcular melhor ativo ──
     # Cada entrada: {"ts": float, "won": bool}  (mantém só últimas 2h)
     asset_log = {a: [] for a in ASSETS}
@@ -898,6 +956,10 @@ async def _deriv_bot_async(ss: SessionState, token: str, valor_brl: float,
                         _tnow = time.time()
                         tick_times[asset].append(_tnow)
                         tick_times[asset] = [t for t in tick_times[asset] if _tnow - t <= 60]
+                        # ── Histórico para vela de 5 minutos ───────────────
+                        tick_history[asset].append((price, _tnow))
+                        if len(tick_history[asset]) > 500:
+                            tick_history[asset] = tick_history[asset][-500:]
 
                         # ── Liquidar contratos expirados a cada tick ────────
                         now = time.time()
@@ -1000,57 +1062,65 @@ async def _deriv_bot_async(ss: SessionState, token: str, valor_brl: float,
                         # para as primeiras operações do dia (fase de aquecimento)
 
                         # ── Filtro de velocidade de tick (mercado ativo) ────
-                        tick_speed = len(tick_times[asset])  # ticks/min últimos 60s
+                        tick_speed = len(tick_times[asset])  # ticks nos últimos 60s
                         if tick_speed < 3:
-                            # Mercado sem atividade suficiente para análise confiável
+                            continue  # mercado inativo
+
+                        # ════════════════════════════════════════════════════
+                        #  ESTRATÉGIA: VELA DE 5 MINUTOS + TRADES DE 5 TICKS
+                        #
+                        #  1. Analisa a vela de 5 minutos atual
+                        #  2. Se a vela for forte (força ≥ 0.45), define direção
+                        #  3. Entra imediatamente nessa direção (sem dupla confirmação)
+                        #  4. Repete a cada 5 ticks enquanto a vela mantiver a direção
+                        #  5. Para se a vela inverter ou fechar
+                        # ════════════════════════════════════════════════════
+                        candle = get_candle_5m(tick_history[asset])
+
+                        if candle is None:
+                            continue  # vela ainda sem dados suficientes
+
+                        # Não entrar nos últimos 10% da vela (últimos ~30s)
+                        # Evita operações que terminam depois que a vela fecha
+                        if candle["time_pct"] > 0.90:
                             continue
 
-                        direction, conf, motivo, votos = calc_signal(tick_buf[asset], config)
-                        # Threshold adaptativo: base + ajuste aprendido para este ativo
+                        # Vela fraca ou doji — sem direção clara
+                        if candle["strength"] < 0.45:
+                            continue
+
+                        direction = candle["direction"]
+                        # Confiança proporcional à força da vela: 0.55 (força 45%) → 0.95 (força 100%)
+                        conf = min(1.0, 0.55 + candle["strength"] * 0.40)
+
                         conf_threshold = config["conf_min"] + perf[asset]["conf_adj"]
+                        if conf < conf_threshold:
+                            continue
 
-                        # Janela de confirmação: 15s para ticks/segundos, 90s para minutos
-                        _confirm_window = 15 if config.get("duracao_unit") in ("t", "s") else 90
+                        aname  = ASSET_NAMES.get(asset, asset)
+                        motivo = (f"Vela 5m {'alta' if direction=='CALL' else 'baixa'}: "
+                                  f"força {candle['strength']*100:.0f}% | "
+                                  f"{candle['ticks']} ticks | "
+                                  f"{candle['time_pct']*100:.0f}% do período")
+                        votos  = [
+                            f"Vela{'↑' if direction=='CALL' else '↓'} {candle['strength']*100:.0f}%",
+                            f"O={candle['open']:.4g} C={candle['close']:.4g}",
+                        ]
 
-                        if direction and conf >= conf_threshold:
-                            ps = pending_signal.get(asset)
-                            if ps and ps["direction"] == direction and (now - ps["ts"]) < _confirm_window:
-                                # ── Segunda confirmação: sinal repetido → OPERA ──
-                                aname = ASSET_NAMES.get(asset, asset)
-                                ss.sinal(aname, direction, conf, motivo, votos)
-                                ss.log(f"✅ Dupla confirmação: {direction} {aname} "
-                                       f"(conf {conf:.2f}, tick/min {tick_speed})", "info")
-                                # Gravar sinal no journal antes de enviar proposta
-                                _log_trade({
-                                    "ts":        datetime.utcnow().isoformat(),
-                                    "event":     "signal",
-                                    "asset":     asset,
-                                    "direction": direction,
-                                    "conf":      round(conf, 4),
-                                    "votos":     votos,
-                                    "tick_speed": tick_speed,
-                                    "price":     tick_buf[asset][-1],
-                                })
-                                last_trade[asset]    = now
-                                pending_signal[asset] = None
-                                await request_proposal(asset, direction, conf, motivo)
-                            else:
-                                # ── Primeira vez: armazenar e aguardar confirmação ──
-                                pending_signal[asset] = {
-                                    "direction": direction, "conf": conf,
-                                    "motivo": motivo, "votos": votos, "ts": now,
-                                }
-                                aname = ASSET_NAMES.get(asset, asset)
-                                ss.log(
-                                    f"⏳ {aname}: sinal {direction} detectado "
-                                    f"(conf {conf:.2f}) — aguardando confirmação…",
-                                    "info"
-                                )
-                        else:
-                            # Sinal não bateu threshold ou mudou → limpar pendente expirado
-                            ps = pending_signal.get(asset)
-                            if ps and (now - ps["ts"]) > _confirm_window:
-                                pending_signal[asset] = None
+                        ss.sinal(aname, direction, conf, motivo, votos)
+                        _log_trade({
+                            "ts":        datetime.utcnow().isoformat(),
+                            "event":     "signal",
+                            "asset":     asset,
+                            "direction": direction,
+                            "conf":      round(conf, 4),
+                            "candle_strength": round(candle["strength"], 3),
+                            "candle_time_pct": round(candle["time_pct"], 2),
+                            "tick_speed":      tick_speed,
+                            "price":           tick_buf[asset][-1],
+                        })
+                        last_trade[asset] = now
+                        await request_proposal(asset, direction, conf, motivo)
                         continue
 
                     # ── PROPOSTA RECEBIDA ─────────────────────────────────
