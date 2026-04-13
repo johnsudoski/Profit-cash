@@ -893,17 +893,11 @@ async def _deriv_bot_async(ss: SessionState, token: str, valor_brl: float,
                     if len(recent_hist) >= 2 and recent_hist[-2:] == [0, 0]:
                         perf[asset_cx]["pause_until"] = time.time() + 600  # pausa 10 min
                         ss.log(f"⏸️ {ASSET_NAMES.get(asset_cx, asset_cx)}: 2 losses seguidos → pausado 10 min", "warn")
-                    # ── Stop global: 3 losses seguidos (ordem cronológica) ───
+                    # ── Histórico global (apenas para ranking/diagnóstico) ───
                     global_hist.append(1 if won else 0)
                     if len(global_hist) > 50:
                         global_hist.pop(0)
-                    if len(global_hist) >= 3 and global_hist[-3:] == [0, 0, 0]:
-                        ss.log(
-                            "🛑 3 LOSSES SEGUIDOS — Robô pausado automaticamente. "
-                            "Reinicie manualmente quando quiser continuar.",
-                            "loss"
-                        )
-                        ss.stop_evt.set()
+                    # Robô NÃO para por losses seguidos — continua operando sempre
 
                 # ── LOOP PRINCIPAL ────────────────────────────────────────
                 while not ss.stop_evt.is_set():
@@ -1082,14 +1076,18 @@ async def _deriv_bot_async(ss: SessionState, token: str, valor_brl: float,
                                 break
 
                         # ════════════════════════════════════════════════════
-                        #  ESTRATÉGIA: VELA FORTE + CONFIRMAÇÃO DE 5 TICKS
+                        #  ESTRATÉGIA: VELA FORTE + ZONA SEGURA + 8 TICKS
                         #
-                        #  ENTRADA CALL quando TODOS os 3 filtros passam:
-                        #    1. Vela 5min com corpo ≥ 60% do range (vela forte)
-                        #    2. Primeiros 70% do tempo da vela
-                        #    3. Últimos 5 ticks todos subindo consecutivamente
+                        #  5 FILTROS EM CASCATA (todos precisam passar):
                         #
-                        #  ENTRADA PUT: mesma lógica, ticks todos descendo
+                        #  F1. Vela 5min com corpo ≥ 60% do range
+                        #  F2. Zona segura: minuto 2 ao 4 da vela (20%–80%)
+                        #      – Evita 1º minuto (formação/ruído)
+                        #      – Evita último minuto (reversão/volatilidade)
+                        #  F3. Mínimo 20 ticks na vela atual (dados confiáveis)
+                        #  F4. 8 ticks consecutivos alinhados com a direção
+                        #  F5. Momentum positivo: close afastando do open ≥ 0.003%
+                        #
                         #  DURAÇÃO: 5 ticks (~5 segundos)
                         # ════════════════════════════════════════════════════
                         candle = get_candle_5m(tick_history[asset])
@@ -1097,23 +1095,27 @@ async def _deriv_bot_async(ss: SessionState, token: str, valor_brl: float,
                         if candle is None:
                             continue  # vela ainda sem dados suficientes
 
-                        # Filtro 1: Vela forte — corpo ≥ 60% do range total
+                        # F1: Vela forte — corpo ≥ 60% do range total
                         if candle["strength"] < 0.60:
                             continue
 
-                        # Filtro 2: Primeiros 70% do tempo da vela
-                        # Evita entrar no final quando a reversão é mais provável
-                        if candle["time_pct"] > 0.70:
+                        # F2: Zona segura — entre 20% e 80% do período de 5min
+                        # 20% = 1 minuto passado | 80% = 1 minuto restante
+                        if candle["time_pct"] < 0.20 or candle["time_pct"] > 0.80:
                             continue
 
-                        # Filtro 3: Confirmação pelos últimos 5 ticks
-                        # CALL → 5 ticks consecutivos subindo (cada um maior que o anterior)
-                        # PUT  → 5 ticks consecutivos descendo (cada um menor que o anterior)
-                        _recent = tick_buf[asset][-6:]  # 6 preços = 5 movimentos
-                        if len(_recent) < 6:
+                        # F3: Mínimo de 20 ticks na vela (dados suficientes para decidir)
+                        if candle["ticks"] < 20:
                             continue
-                        _ticks_up   = all(_recent[i] < _recent[i+1] for i in range(5))
-                        _ticks_down = all(_recent[i] > _recent[i+1] for i in range(5))
+
+                        # F4: 8 ticks consecutivos confirmando a direção
+                        # CALL → 8 preços em sequência cada um maior que o anterior
+                        # PUT  → 8 preços em sequência cada um menor que o anterior
+                        _recent = tick_buf[asset][-9:]  # 9 preços = 8 movimentos
+                        if len(_recent) < 9:
+                            continue
+                        _ticks_up   = all(_recent[i] < _recent[i+1] for i in range(8))
+                        _ticks_down = all(_recent[i] > _recent[i+1] for i in range(8))
 
                         candle_dir = candle["direction"]
                         if candle_dir == "CALL" and not _ticks_up:
@@ -1121,8 +1123,15 @@ async def _deriv_bot_async(ss: SessionState, token: str, valor_brl: float,
                         if candle_dir == "PUT" and not _ticks_down:
                             continue   # vela de baixa mas ticks não confirmam
 
+                        # F5: Momentum — close deve estar afastando do open pelo menos 0.003%
+                        # Filtra velas que "parecem fortes" mas estão andando de lado
+                        _mom_min = 0.00003  # 0.003%
+                        _mom_abs = abs(candle["momentum"]) / 100.0
+                        if _mom_abs < _mom_min:
+                            continue
+
                         direction = candle_dir
-                        # Confiança: 0.60 (força 60%) → 0.95 (força 100%)
+                        # Confiança: base 0.60 + força da vela (máx 0.95)
                         conf = min(1.0, 0.55 + candle["strength"] * 0.40)
 
                         conf_threshold = config["conf_min"] + perf[asset]["conf_adj"]
@@ -1130,15 +1139,19 @@ async def _deriv_bot_async(ss: SessionState, token: str, valor_brl: float,
                             continue
 
                         aname  = ASSET_NAMES.get(asset, asset)
-                        _arrows = "↑↑↑↑↑" if direction == "CALL" else "↓↓↓↓↓"
+                        _arrows = "↑↑↑↑↑↑↑↑" if direction == "CALL" else "↓↓↓↓↓↓↓↓"
+                        _zona_min = int(candle["time_pct"] * 5)   # minuto atual da vela
                         motivo = (f"Vela 5m {'alta' if direction=='CALL' else 'baixa'}: "
                                   f"força {candle['strength']*100:.0f}% | "
-                                  f"5 ticks {_arrows} | "
-                                  f"{candle['time_pct']*100:.0f}% do período")
+                                  f"8 ticks {_arrows} | "
+                                  f"min {_zona_min}/5 | "
+                                  f"mom {candle['momentum']:+.4f}%")
                         votos  = [
                             f"Vela{'↑' if direction=='CALL' else '↓'} {candle['strength']*100:.0f}%",
-                            f"5 ticks {'subindo' if direction=='CALL' else 'descendo'} {_arrows}",
+                            f"Zona segura: {candle['time_pct']*100:.0f}% (min {_zona_min})",
+                            f"8 ticks {'subindo' if direction=='CALL' else 'descendo'} {_arrows}",
                             f"O={candle['open']:.4g} C={candle['close']:.4g}",
+                            f"Momentum {candle['momentum']:+.4f}%",
                         ]
 
                         ss.sinal(aname, direction, conf, motivo, votos)
@@ -1150,7 +1163,9 @@ async def _deriv_bot_async(ss: SessionState, token: str, valor_brl: float,
                             "conf":            round(conf, 4),
                             "candle_strength": round(candle["strength"], 3),
                             "candle_time_pct": round(candle["time_pct"], 2),
-                            "tick_confirm":    "up" if direction == "CALL" else "down",
+                            "candle_ticks":    candle["ticks"],
+                            "candle_momentum": round(candle["momentum"], 5),
+                            "tick_confirm_8":  "up" if direction == "CALL" else "down",
                             "tick_speed":      tick_speed,
                             "price":           tick_buf[asset][-1],
                         })
