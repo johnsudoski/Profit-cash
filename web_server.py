@@ -758,9 +758,9 @@ async def _deriv_bot_async(ss: SessionState, token: str, valor_brl: float,
     #   Round 0: R$5.00   Round 1: R$11.00  Round 2: R$24.20
     #   Round 3: R$53.24  Round 4: R$117.13 Round 5: R$257.69
     #
-    _MART_BASE_BRL  = 5.0     # valor base fixo em R$
-    _MART_MULT      = 2.2     # multiplicador por round de loss
-    _MART_MAX_ROUND = 5       # máximo de rounds antes de parar (bust)
+    _MART_BASE_BRL  = valor_brl  # valor base = escolha do usuário (padrão R$2.50)
+    _MART_MULT      = 2.2        # multiplicador por round de loss
+    _MART_MAX_ROUND = 5          # máximo de rounds antes de parar (bust)
     mart_round      = [0]     # round atual (lista para ser mutável em closures)
     mart_stake_curr = [0.0]   # stake atual na moeda da conta (calculado após auth)
 
@@ -1821,7 +1821,7 @@ def api_start():
     ss   = get_or_create_session(sid)
 
     token      = data.get("token", "").strip()
-    stake      = max(1.0, float(data.get("valor", 5.0)))
+    stake      = max(0.5, float(data.get("valor", 2.5)))
     estrategia = data.get("estrategia", "moderada")
     want_demo  = bool(data.get("demo", True))
 
