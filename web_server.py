@@ -820,6 +820,9 @@ async def _deriv_bot_async(ss: SessionState, token: str, valor_brl: float,
     _MART_MAX_ROUND = 3          # máximo de rounds antes de parar (bust)
     mart_round      = [0]     # round atual (lista para ser mutável em closures)
     mart_stake_curr = [0.0]   # stake atual na moeda da conta (calculado após auth)
+    # Recuperação imediata: após LOSS guarda {direction, asset} para re-entrar
+    # na próxima vela sem esperar novo sinal (bypass de todos os filtros)
+    recovery_pending = {a: None for a in ASSETS}  # None ou 'CALL'/'PUT'
 
     def _best_asset():
         """
@@ -1056,9 +1059,10 @@ async def _deriv_bot_async(ss: SessionState, token: str, valor_brl: float,
 
                     # ── MARTINGALE: ajustar stake para próxima operação ───
                     if won:
-                        # WIN → reseta ciclo
+                        # WIN → reseta ciclo e limpa recuperação pendente
                         mart_round[0] = 0
                         mart_stake_curr[0] = _mart_stake(0)
+                        recovery_pending[asset_cx] = None
                         ss.log(
                             f"♻️  Martingale reset → Round 0 | "
                             f"R${_MART_BASE_BRL:.2f} ({currency} {mart_stake_curr[0]:.2f})",
@@ -1080,9 +1084,13 @@ async def _deriv_bot_async(ss: SessionState, token: str, valor_brl: float,
                         else:
                             mart_stake_curr[0] = _mart_stake(mart_round[0])
                             _brl_next = _MART_BASE_BRL * (_MART_MULT ** mart_round[0])
+                            # Ativa recuperação imediata: re-entra na mesma direção
+                            # na próxima vela sem esperar novo sinal
+                            recovery_pending[asset_cx] = direction_cx
                             ss.log(
                                 f"📈 Martingale Round {mart_round[0]}/{_MART_MAX_ROUND} | "
-                                f"Próxima: R${_brl_next:.2f} ({currency} {mart_stake_curr[0]:.2f})",
+                                f"Próxima: R${_brl_next:.2f} ({currency} {mart_stake_curr[0]:.2f}) | "
+                                f"⚡ Re-entrada imediata {direction_cx}",
                                 "warn"
                             )
 
@@ -1210,6 +1218,39 @@ async def _deriv_bot_async(ss: SessionState, token: str, valor_brl: float,
                                 ps = pending_signal[_a]
                                 if ps and (now - ps["ts"]) > _exp:
                                     pending_signal[_a] = None
+                            continue
+
+                        # ── MARTINGALE RECOVERY: re-entrada imediata ────────
+                        # Após LOSS, recovery_pending[asset] guarda a direção.
+                        # Bypassa cooldown, pausa, tendência e 3-velas —
+                        # entra na próxima vela disponível com o stake dobrado.
+                        if recovery_pending.get(asset):
+                            _rec_dir = recovery_pending[asset]
+                            recovery_pending[asset] = None   # consumir flag
+                            _tick_speed_rec = len(tick_times[asset])
+                            if _tick_speed_rec < 3:
+                                # mercado sem ticks, reagendar para próximo tick
+                                recovery_pending[asset] = _rec_dir
+                                continue
+                            # Stop diário antes de re-entrar
+                            _saldo_rec = ss.estado_snap.get("saldo", saldo0)
+                            if saldo0 > 0 and (saldo0 - _saldo_rec) / saldo0 >= config["stop_diario_pct"]:
+                                ss.stop_evt.set()
+                                continue
+                            _brl_rec   = _MART_BASE_BRL * (_MART_MULT ** mart_round[0])
+                            _conf_rec  = 0.85
+                            _motivo_rec = (
+                                f"⚡ Martingale Recovery Round {mart_round[0]} | "
+                                f"{_rec_dir} | R${_brl_rec:.2f} "
+                                f"({currency} {mart_stake_curr[0]:.2f})"
+                            )
+                            ss.sinal(ASSET_NAMES.get(asset, asset), _rec_dir,
+                                     _conf_rec, _motivo_rec,
+                                     [f"Recovery Round {mart_round[0]}",
+                                      f"{_rec_dir} (mesma direção anterior)",
+                                      f"Stake: R${_brl_rec:.2f}"])
+                            last_trade[asset] = now
+                            await request_proposal(asset, _rec_dir, _conf_rec, _motivo_rec)
                             continue
 
                         # ── Pausa adaptativa por ativo ──────────────────────
