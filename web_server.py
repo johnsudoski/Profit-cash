@@ -319,6 +319,69 @@ def calc_bb(prices: list, period: int = 20, num_std: float = 2.0):
     return mid, mid + num_std * std, mid - num_std * std
 
 
+def detect_bb_squeeze_signal(prices: list, period: int = 20, dev: float = 2.0):
+    """
+    Sinal de Bollinger Bands Squeeze + Breakout (lógica do Trade AI).
+
+    Como funciona:
+    1. SQUEEZE: compara bandwidth atual (BB de 20 ticks) com bandwidth
+       de uma janela 3x maior. Se a banda atual é ≤ 65% da normal → squeeze.
+    2. BREAKOUT: preço toca ou cruza uma das bandas após o squeeze.
+       - Preço >= upper  → CALL (breakout para cima)
+       - Preço <= lower  → PUT  (breakout para baixo)
+       - Próximo à banda (dentro de 15% do half-range) + tendência → antecipa
+
+    Retorna: ('CALL' | 'PUT' | None, squeeze_ratio)
+      squeeze_ratio: 0.0–1.0, quanto menor mais forte o squeeze
+                     (ex: 0.40 = banda atual é 40% da normal)
+    """
+    needed = period * 3 + 5
+    if len(prices) < needed:
+        return None, 0.0
+
+    # BB janela atual (20 ticks)
+    mid_now, upper_now, lower_now = calc_bb(prices[-period:], period, dev)
+    if not mid_now or mid_now == 0:
+        return None, 0.0
+    bw_now = (upper_now - lower_now) / mid_now   # bandwidth normalizado
+
+    # BB janela histórica (60 ticks) — referência de "volatilidade normal"
+    mid_hist, upper_hist, lower_hist = calc_bb(prices[-(period * 3):], period * 3, dev)
+    if not mid_hist or mid_hist == 0:
+        return None, 0.0
+    bw_hist = (upper_hist - lower_hist) / mid_hist
+
+    # Squeeze: banda atual comprimida em relação à normal
+    if bw_hist == 0:
+        return None, 0.0
+    squeeze_ratio = bw_now / bw_hist   # < 0.65 = squeeze
+
+    if squeeze_ratio > 0.65:
+        return None, squeeze_ratio     # sem squeeze, não operar
+
+    # Breakout: preço tocou ou cruzou a banda
+    price = prices[-1]
+
+    if price >= upper_now:
+        return "CALL", squeeze_ratio
+    if price <= lower_now:
+        return "PUT", squeeze_ratio
+
+    # Iminente: preço dentro de 15% do half-range da banda + tendência confirmando
+    half_range = (upper_now - lower_now) / 2.0
+    if half_range > 0:
+        near_upper = (upper_now - price) / half_range
+        near_lower = (price - lower_now) / half_range
+        trend_up   = prices[-1] > prices[-6] if len(prices) >= 6 else False
+
+        if near_upper < 0.15 and trend_up:
+            return "CALL", squeeze_ratio
+        if near_lower < 0.15 and not trend_up:
+            return "PUT", squeeze_ratio
+
+    return None, squeeze_ratio
+
+
 def calc_stoch(prices: list, k_period: int = 14, d_period: int = 3):
     """
     Stochastic Oscillator (%K e %D).
@@ -685,6 +748,22 @@ async def _deriv_bot_async(ss: SessionState, token: str, valor_brl: float,
     asset_log = {a: [] for a in ASSETS}
     _TWO_HOURS = 7200  # segundos
 
+    # ── MARTINGALE ────────────────────────────────────────────────────────────
+    # Base: R$5 convertido para moeda da conta.
+    # Após cada LOSS: multiplica por 2.2 (recupera perdas + lucro com payout 92%).
+    # Após WIN: reseta para o valor base.
+    # Após 5 losses consecutivos (bust): para o bot.
+    #
+    # Sequência com R$5 base (em reais):
+    #   Round 0: R$5.00   Round 1: R$11.00  Round 2: R$24.20
+    #   Round 3: R$53.24  Round 4: R$117.13 Round 5: R$257.69
+    #
+    _MART_BASE_BRL  = 5.0     # valor base fixo em R$
+    _MART_MULT      = 2.2     # multiplicador por round de loss
+    _MART_MAX_ROUND = 5       # máximo de rounds antes de parar (bust)
+    mart_round      = [0]     # round atual (lista para ser mutável em closures)
+    mart_stake_curr = [0.0]   # stake atual na moeda da conta (calculado após auth)
+
     def _best_asset():
         """
         Retorna o ativo com maior taxa de acerto nas últimas 2h.
@@ -788,7 +867,18 @@ async def _deriv_bot_async(ss: SessionState, token: str, valor_brl: float,
                 else:
                     rate_brl = _BRL_PER.get(currency, 5.70)
                     stake    = max(round(valor_brl / rate_brl, 2), 0.35)
-                ss.log(f"💱 R${valor_brl:.2f} → {currency} {stake:.2f}", "info")
+
+                # ── MARTINGALE: calcular stake base na moeda da conta ─────
+                def _mart_stake(rnd: int) -> float:
+                    """Retorna o stake em moeda da conta para o round N."""
+                    brl = _MART_BASE_BRL * (_MART_MULT ** rnd)
+                    if currency == "BRL":
+                        return round(brl, 2)
+                    return max(round(brl / rate_brl, 2), 0.35)
+
+                mart_stake_curr[0] = _mart_stake(0)
+                ss.log(f"💱 R${_MART_BASE_BRL:.2f} base → {currency} {mart_stake_curr[0]:.2f} "
+                       f"| Martingale x{_MART_MULT} até {_MART_MAX_ROUND} rounds", "info")
 
                 # ── SUBSCRIÇÕES ───────────────────────────────────────────
                 await dws.send(json.dumps({"balance": 1, "subscribe": 1}))
@@ -802,23 +892,32 @@ async def _deriv_bot_async(ss: SessionState, token: str, valor_brl: float,
                 async def request_proposal(asset, direction, conf, motivo):
                     req_ctr[0] += 1
                     rid = req_ctr[0]  # INTEIRO — Deriv exige inteiro
+                    _amount = mart_stake_curr[0]   # stake dinâmico do Martingale
                     pending_p[rid] = {
                         "asset": asset, "direction": direction,
-                        "conf": conf, "motivo": motivo
+                        "conf": conf, "motivo": motivo,
+                        "mart_round": mart_round[0],
+                        "amount": _amount,
                     }
                     await dws.send(json.dumps({
                         "proposal":       1,
                         "req_id":         rid,
-                        "amount":         stake,
+                        "amount":         _amount,
                         "basis":          "stake",
-                        "contract_type":  direction,    # "CALL" ou "PUT"
+                        "contract_type":  direction,
                         "currency":       currency,
                         "duration":       config["duracao"],
                         "duration_unit":  config.get("duracao_unit", "s"),
                         "symbol":         asset,
                     }))
                     aname = ASSET_NAMES.get(asset, asset)
-                    ss.log(f"📡 Proposta enviada: {direction} {aname} (req#{rid})", "info")
+                    _brl_now = _MART_BASE_BRL * (_MART_MULT ** mart_round[0])
+                    ss.log(
+                        f"📡 {direction} {aname} | "
+                        f"Round {mart_round[0]} | R${_brl_now:.2f} ({currency} {_amount:.2f})"
+                        f" (req#{rid})",
+                        "info"
+                    )
 
                 # ── LIQUIDAR CONTRATO (função local reutilizável) ────────
                 def _liquidar(cid):
@@ -893,11 +992,42 @@ async def _deriv_bot_async(ss: SessionState, token: str, valor_brl: float,
                     if len(recent_hist) >= 2 and recent_hist[-2:] == [0, 0]:
                         perf[asset_cx]["pause_until"] = time.time() + 600  # pausa 10 min
                         ss.log(f"⏸️ {ASSET_NAMES.get(asset_cx, asset_cx)}: 2 losses seguidos → pausado 10 min", "warn")
-                    # ── Histórico global (apenas para ranking/diagnóstico) ───
+                    # ── Histórico global (diagnóstico) ───────────────────
                     global_hist.append(1 if won else 0)
                     if len(global_hist) > 50:
                         global_hist.pop(0)
-                    # Robô NÃO para por losses seguidos — continua operando sempre
+
+                    # ── MARTINGALE: ajustar stake para próxima operação ───
+                    if won:
+                        # WIN → reseta ciclo
+                        mart_round[0] = 0
+                        mart_stake_curr[0] = _mart_stake(0)
+                        ss.log(
+                            f"♻️  Martingale reset → Round 0 | "
+                            f"R${_MART_BASE_BRL:.2f} ({currency} {mart_stake_curr[0]:.2f})",
+                            "win"
+                        )
+                    else:
+                        # LOSS → avança round
+                        mart_round[0] += 1
+                        if mart_round[0] > _MART_MAX_ROUND:
+                            _brl_lost = _MART_BASE_BRL * sum(
+                                _MART_MULT ** r for r in range(_MART_MAX_ROUND + 1)
+                            )
+                            ss.log(
+                                f"🛑 MARTINGALE BUST após {_MART_MAX_ROUND} losses "
+                                f"(~R${_brl_lost:.0f} de exposição). Bot pausado.",
+                                "loss"
+                            )
+                            ss.stop_evt.set()
+                        else:
+                            mart_stake_curr[0] = _mart_stake(mart_round[0])
+                            _brl_next = _MART_BASE_BRL * (_MART_MULT ** mart_round[0])
+                            ss.log(
+                                f"📈 Martingale Round {mart_round[0]}/{_MART_MAX_ROUND} | "
+                                f"Próxima: R${_brl_next:.2f} ({currency} {mart_stake_curr[0]:.2f})",
+                                "warn"
+                            )
 
                 # ── LOOP PRINCIPAL ────────────────────────────────────────
                 while not ss.stop_evt.is_set():
@@ -1076,98 +1206,64 @@ async def _deriv_bot_async(ss: SessionState, token: str, valor_brl: float,
                                 break
 
                         # ════════════════════════════════════════════════════
-                        #  ESTRATÉGIA: VELA FORTE + ZONA SEGURA + 8 TICKS
+                        #  ESTRATÉGIA: BB SQUEEZE + BREAKOUT  (Trade AI)
                         #
-                        #  5 FILTROS EM CASCATA (todos precisam passar):
+                        #  Mesma lógica do robô analisado:
+                        #  1. BB Squeeze: banda atual ≤ 65% da banda normal
+                        #     (Bollinger Bands tightening)
+                        #  2. Breakout direcional: preço toca/cruza a banda
+                        #     após o squeeze (Downward/Upward spike)
+                        #  3. Operação de 5 ticks com Martingale automático
                         #
-                        #  F1. Vela 5min com corpo ≥ 60% do range
-                        #  F2. Zona segura: minuto 2 ao 4 da vela (20%–80%)
-                        #      – Evita 1º minuto (formação/ruído)
-                        #      – Evita último minuto (reversão/volatilidade)
-                        #  F3. Mínimo 20 ticks na vela atual (dados confiáveis)
-                        #  F4. 8 ticks consecutivos alinhados com a direção
-                        #  F5. Momentum positivo: close afastando do open ≥ 0.003%
-                        #
-                        #  DURAÇÃO: 5 ticks (~5 segundos)
+                        #  MARTINGALE:
+                        #   WIN  → reseta para R$5 (Round 0)
+                        #   LOSS → multiplica por 2.2 (até Round 5, depois para)
+                        #   R$5 → R$11 → R$24 → R$53 → R$117 → R$258
                         # ════════════════════════════════════════════════════
-                        candle = get_candle_5m(tick_history[asset])
-
-                        if candle is None:
-                            continue  # vela ainda sem dados suficientes
-
-                        # F1: Vela forte — corpo ≥ 60% do range total
-                        if candle["strength"] < 0.60:
+                        buf = tick_buf[asset]
+                        if len(buf) < 65:   # mínimo para calcular BB histórico
                             continue
 
-                        # F2: Zona segura — entre 20% e 80% do período de 5min
-                        # 20% = 1 minuto passado | 80% = 1 minuto restante
-                        if candle["time_pct"] < 0.20 or candle["time_pct"] > 0.80:
-                            continue
+                        bb_signal, squeeze_ratio = detect_bb_squeeze_signal(buf)
 
-                        # F3: Mínimo de 20 ticks na vela (dados suficientes para decidir)
-                        if candle["ticks"] < 20:
-                            continue
+                        if bb_signal is None:
+                            continue   # sem squeeze ou sem breakout
 
-                        # F4: 8 ticks consecutivos confirmando a direção
-                        # CALL → 8 preços em sequência cada um maior que o anterior
-                        # PUT  → 8 preços em sequência cada um menor que o anterior
-                        _recent = tick_buf[asset][-9:]  # 9 preços = 8 movimentos
-                        if len(_recent) < 9:
-                            continue
-                        _ticks_up   = all(_recent[i] < _recent[i+1] for i in range(8))
-                        _ticks_down = all(_recent[i] > _recent[i+1] for i in range(8))
-
-                        candle_dir = candle["direction"]
-                        if candle_dir == "CALL" and not _ticks_up:
-                            continue   # vela de alta mas ticks não confirmam
-                        if candle_dir == "PUT" and not _ticks_down:
-                            continue   # vela de baixa mas ticks não confirmam
-
-                        # F5: Momentum — close deve estar afastando do open pelo menos 0.003%
-                        # Filtra velas que "parecem fortes" mas estão andando de lado
-                        _mom_min = 0.00003  # 0.003%
-                        _mom_abs = abs(candle["momentum"]) / 100.0
-                        if _mom_abs < _mom_min:
-                            continue
-
-                        direction = candle_dir
-                        # Confiança: base 0.60 + força da vela (máx 0.95)
-                        conf = min(1.0, 0.55 + candle["strength"] * 0.40)
+                        direction = bb_signal
+                        # Confiança: quanto mais forte o squeeze, mais confiante
+                        # squeeze_ratio: 0.0 = squeeze extremo (conf alta)
+                        #                0.65 = limite (conf mínima)
+                        conf = min(1.0, 0.95 - squeeze_ratio * 0.50)
 
                         conf_threshold = config["conf_min"] + perf[asset]["conf_adj"]
                         if conf < conf_threshold:
                             continue
 
                         aname  = ASSET_NAMES.get(asset, asset)
-                        _arrows = "↑↑↑↑↑↑↑↑" if direction == "CALL" else "↓↓↓↓↓↓↓↓"
-                        _zona_min = int(candle["time_pct"] * 5)   # minuto atual da vela
-                        motivo = (f"Vela 5m {'alta' if direction=='CALL' else 'baixa'}: "
-                                  f"força {candle['strength']*100:.0f}% | "
-                                  f"8 ticks {_arrows} | "
-                                  f"min {_zona_min}/5 | "
-                                  f"mom {candle['momentum']:+.4f}%")
-                        votos  = [
-                            f"Vela{'↑' if direction=='CALL' else '↓'} {candle['strength']*100:.0f}%",
-                            f"Zona segura: {candle['time_pct']*100:.0f}% (min {_zona_min})",
-                            f"8 ticks {'subindo' if direction=='CALL' else 'descendo'} {_arrows}",
-                            f"O={candle['open']:.4g} C={candle['close']:.4g}",
-                            f"Momentum {candle['momentum']:+.4f}%",
+                        _mart_info = (f"Round {mart_round[0]} | "
+                                      f"R${_MART_BASE_BRL * (_MART_MULT ** mart_round[0]):.2f}")
+                        motivo = (f"BB Squeeze breakout {'↑ CALL' if direction=='CALL' else '↓ PUT'}: "
+                                  f"squeeze {squeeze_ratio*100:.0f}% | "
+                                  f"conf {conf*100:.0f}% | {_mart_info}")
+                        votos = [
+                            f"BB Squeeze: banda atual = {squeeze_ratio*100:.0f}% da normal",
+                            f"Breakout {'↑' if direction=='CALL' else '↓'} {direction}",
+                            f"Martingale {_mart_info}",
+                            f"Price: {buf[-1]:.5g}",
                         ]
 
                         ss.sinal(aname, direction, conf, motivo, votos)
                         _log_trade({
-                            "ts":              datetime.utcnow().isoformat(),
-                            "event":           "signal",
-                            "asset":           asset,
-                            "direction":       direction,
-                            "conf":            round(conf, 4),
-                            "candle_strength": round(candle["strength"], 3),
-                            "candle_time_pct": round(candle["time_pct"], 2),
-                            "candle_ticks":    candle["ticks"],
-                            "candle_momentum": round(candle["momentum"], 5),
-                            "tick_confirm_8":  "up" if direction == "CALL" else "down",
-                            "tick_speed":      tick_speed,
-                            "price":           tick_buf[asset][-1],
+                            "ts":           datetime.utcnow().isoformat(),
+                            "event":        "signal",
+                            "asset":        asset,
+                            "direction":    direction,
+                            "conf":         round(conf, 4),
+                            "squeeze_ratio":round(squeeze_ratio, 3),
+                            "mart_round":   mart_round[0],
+                            "mart_stake_brl": round(_MART_BASE_BRL * (_MART_MULT ** mart_round[0]), 2),
+                            "tick_speed":   tick_speed,
+                            "price":        buf[-1],
                         })
                         last_trade[asset] = now
                         await request_proposal(asset, direction, conf, motivo)
