@@ -56,9 +56,9 @@ STRATEGIES = {
     # duracao: em TICKS (duracao_unit: "t")
     # 5 ticks ≈ 5 segundos nos índices sintéticos da Deriv
     # Deriv não aceita duration_unit "s" < 15s — ticks é o menor contrato disponível
-    "cautelosa": {"duracao": 5, "duracao_unit": "t", "rsi_upper": 75, "rsi_lower": 25, "conf_min": 0.78, "stop_diario_pct": 0.15},
-    "moderada":  {"duracao": 5, "duracao_unit": "t", "rsi_upper": 70, "rsi_lower": 30, "conf_min": 0.70, "stop_diario_pct": 0.15},
-    "agressiva": {"duracao": 5, "duracao_unit": "t", "rsi_upper": 65, "rsi_lower": 35, "conf_min": 0.62, "stop_diario_pct": 0.15},
+    "cautelosa": {"duracao": 5, "duracao_unit": "t", "rsi_upper": 75, "rsi_lower": 25, "conf_min": 0.78, "stop_diario_pct": 0.30},
+    "moderada":  {"duracao": 5, "duracao_unit": "t", "rsi_upper": 70, "rsi_lower": 30, "conf_min": 0.70, "stop_diario_pct": 0.30},
+    "agressiva": {"duracao": 5, "duracao_unit": "t", "rsi_upper": 65, "rsi_lower": 35, "conf_min": 0.62, "stop_diario_pct": 0.30},
 }
 
 
