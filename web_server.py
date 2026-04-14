@@ -760,7 +760,7 @@ async def _deriv_bot_async(ss: SessionState, token: str, valor_brl: float,
     #
     _MART_BASE_BRL  = valor_brl  # valor base = escolha do usuário (padrão R$2.50)
     _MART_MULT      = 2.2        # multiplicador por round de loss
-    _MART_MAX_ROUND = 5          # máximo de rounds antes de parar (bust)
+    _MART_MAX_ROUND = 3          # máximo de rounds antes de parar (bust)
     mart_round      = [0]     # round atual (lista para ser mutável em closures)
     mart_stake_curr = [0.0]   # stake atual na moeda da conta (calculado após auth)
 

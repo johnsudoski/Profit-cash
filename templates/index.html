@@ -879,7 +879,7 @@ function renderHist() {
 function updateMartInfo() {
   const base = parseFloat(document.getElementById('valor').value) || 2.5;
   const mult = 2.2;
-  const rounds = 5;
+  const rounds = 3;
   let seq = [];
   for (let i = 0; i <= rounds; i++) {
     seq.push('R$' + (base * Math.pow(mult, i)).toFixed(2));
