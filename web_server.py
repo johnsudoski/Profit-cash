@@ -382,6 +382,63 @@ def detect_bb_squeeze_signal(prices: list, period: int = 20, dev: float = 2.0):
     return None, squeeze_ratio
 
 
+def calc_trend(prices: list, fast: int = 10, slow: int = 30) -> str:
+    """
+    Determina a tendência dominante comparando EMA rápida vs EMA lenta.
+
+    Retorna:
+      'UP'      → tendência de alta  (só operar CALL)
+      'DOWN'    → tendência de baixa (só operar PUT)
+      'NEUTRAL' → lateral, sem operar
+    """
+    if len(prices) < slow + 5:
+        return "NEUTRAL"
+    ema_fast = calc_ema(prices, fast)
+    ema_slow = calc_ema(prices, slow)
+    diff_pct = (ema_fast - ema_slow) / ema_slow if ema_slow else 0.0
+    # Exige diferença mínima de 0.005% para considerar tendência definida
+    if diff_pct > 0.00005:
+        return "UP"
+    if diff_pct < -0.00005:
+        return "DOWN"
+    return "NEUTRAL"
+
+
+def check_3candle_confirm(prices: list, direction: str,
+                          candle_size: int = 5) -> bool:
+    """
+    Verifica se as últimas 3 micro-velas confirmam a direção.
+
+    Cada micro-vela = `candle_size` ticks (padrão 5).
+    Confirmação:
+      CALL → as 3 últimas velas fecharam ACIMA da abertura (bullish)
+      PUT  → as 3 últimas velas fecharam ABAIXO da abertura (bearish)
+
+    Retorna True se as 3 velas confirmam, False caso contrário.
+    """
+    needed = candle_size * 3 + 1
+    if len(prices) < needed:
+        return False
+
+    confirmed = 0
+    for i in range(3):
+        # Vela mais recente = i=0, anterior = i=1, etc.
+        end   = len(prices) - i * candle_size
+        start = end - candle_size
+        if start < 0:
+            return False
+        open_p  = prices[start]
+        close_p = prices[end - 1]
+        if direction == "CALL" and close_p > open_p:
+            confirmed += 1
+        elif direction == "PUT" and close_p < open_p:
+            confirmed += 1
+        else:
+            break   # vela contrária → falha imediata
+
+    return confirmed == 3
+
+
 def calc_stoch(prices: list, k_period: int = 14, d_period: int = 3):
     """
     Stochastic Oscillator (%K e %D).
@@ -1230,6 +1287,24 @@ async def _deriv_bot_async(ss: SessionState, token: str, valor_brl: float,
                             continue   # sem squeeze ou sem breakout
 
                         direction = bb_signal
+
+                        # ── FILTRO 1: Tendência (só operar a favor) ──────────
+                        # EMA 10 vs EMA 30 define a direção dominante.
+                        # CALL só entra se tendência é UP; PUT só se DOWN.
+                        trend = calc_trend(buf, fast=10, slow=30)
+                        if trend == "NEUTRAL":
+                            continue   # mercado lateral, não operar
+                        if direction == "CALL" and trend != "UP":
+                            continue   # sinal contra a tendência, ignorar
+                        if direction == "PUT"  and trend != "DOWN":
+                            continue   # sinal contra a tendência, ignorar
+
+                        # ── FILTRO 2: Confirmação de 3 micro-velas ───────────
+                        # 3 velas consecutivas de 5 ticks cada devem fechar
+                        # na mesma direção do sinal (todas bullish ou todas bearish).
+                        if not check_3candle_confirm(buf, direction, candle_size=5):
+                            continue   # sem confirmação das 3 velas, não operar
+
                         # Confiança: quanto mais forte o squeeze, mais confiante
                         # squeeze_ratio: 0.0 = squeeze extremo (conf alta)
                         #                0.65 = limite (conf mínima)
@@ -1242,11 +1317,14 @@ async def _deriv_bot_async(ss: SessionState, token: str, valor_brl: float,
                         aname  = ASSET_NAMES.get(asset, asset)
                         _mart_info = (f"Round {mart_round[0]} | "
                                       f"R${_MART_BASE_BRL * (_MART_MULT ** mart_round[0]):.2f}")
-                        motivo = (f"BB Squeeze breakout {'↑ CALL' if direction=='CALL' else '↓ PUT'}: "
+                        motivo = (f"BB Squeeze {'↑ CALL' if direction=='CALL' else '↓ PUT'} | "
+                                  f"Tendência {trend} | 3 velas ✓ | "
                                   f"squeeze {squeeze_ratio*100:.0f}% | "
                                   f"conf {conf*100:.0f}% | {_mart_info}")
                         votos = [
                             f"BB Squeeze: banda atual = {squeeze_ratio*100:.0f}% da normal",
+                            f"Tendência {trend} ✓ ({direction} a favor)",
+                            f"3 micro-velas confirmadas ✓",
                             f"Breakout {'↑' if direction=='CALL' else '↓'} {direction}",
                             f"Martingale {_mart_info}",
                             f"Price: {buf[-1]:.5g}",
