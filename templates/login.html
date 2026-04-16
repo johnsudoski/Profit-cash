@@ -1,205 +1,314 @@
 <!DOCTYPE html>
 <html lang="pt-BR">
 <head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no,viewport-fit=cover">
-<meta name="theme-color" content="#000000">
-<title>Profit Cash — Entrar</title>
-<style>
-*{box-sizing:border-box;margin:0;padding:0;-webkit-tap-highlight-color:transparent}
-:root{
-  --bg:#000;--bg2:#1C1C1E;--bg3:#2C2C2E;--bg4:#3A3A3C;
-  --sep:rgba(84,84,88,.65);--fill3:rgba(118,118,128,.24);
-  --lbl:#FFF;--lbl2:rgba(235,235,245,.6);--lbl3:rgba(235,235,245,.3);
-  --blue:#0A84FF;--green:#30D158;--red:#FF453A;
-  --r:12px;--r-lg:20px;--r-full:100px;
-}
-html,body{
-  height:100%;min-height:100dvh;
-  font-family:-apple-system,BlinkMacSystemFont,'SF Pro Text',system-ui,sans-serif;
-  background:var(--bg);color:var(--lbl);
-  -webkit-font-smoothing:antialiased;
-  display:flex;align-items:center;justify-content:center;
-  padding:24px 16px;
-}
-.card{
-  width:100%;max-width:380px;
-  background:var(--bg2);
-  border-radius:var(--r-lg);
-  overflow:hidden;
-  box-shadow:0 8px 48px rgba(0,0,0,.65);
-}
-.logo{
-  text-align:center;
-  padding:32px 24px 24px;
-  border-bottom:0.5px solid var(--sep);
-}
-.logo-icon{
-  font-size:44px;
-  display:block;
-  margin-bottom:10px;
-}
-.logo-title{
-  font-size:24px;font-weight:700;letter-spacing:-0.5px;
-}
-.logo-title span{color:var(--green)}
-.logo-sub{
-  font-size:13px;color:var(--lbl3);margin-top:4px;
-}
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no,viewport-fit=cover">
+  <meta name="theme-color" content="#000000">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <title>Profit Cash · Entrar</title>
+  <style>
+    /* ═══════════════════════════════════════
+       RESET & TOKENS
+    ═══════════════════════════════════════ */
+    *, *::before, *::after {
+      box-sizing: border-box; margin: 0; padding: 0;
+      -webkit-tap-highlight-color: transparent;
+    }
+    :root {
+      --bg:    #000;
+      --bg2:   #0D0D0D;
+      --bg3:   #1A1A1A;
+      --bg4:   #252525;
+      --bg5:   #2E2E2E;
+      --sep:   rgba(84,84,88,.5);
+      --fill:  rgba(118,118,128,.18);
+      --lbl:   #FFF;
+      --lbl2:  rgba(235,235,245,.6);
+      --lbl3:  rgba(235,235,245,.3);
+      --accent:#FF2D55;
+      --accent2:rgba(255,45,85,.15);
+      --green: #30D158;
+      --green2:rgba(48,209,88,.15);
+      --red:   #FF453A;
+      --r:     12px;
+      --r-lg:  18px;
+      --r-xl:  24px;
+    }
+    html, body {
+      height: 100%; min-height: 100dvh;
+      background: var(--bg); color: var(--lbl);
+      font-family: -apple-system, BlinkMacSystemFont, 'SF Pro Text', 'Helvetica Neue', system-ui, sans-serif;
+      -webkit-font-smoothing: antialiased; overflow-x: hidden;
+    }
 
-/* Tabs */
-.tabs{
-  display:flex;
-  background:var(--fill3);
-  margin:16px 16px 0;
-  border-radius:10px;
-  padding:2px;
-}
-.tab{
-  flex:1;padding:8px;text-align:center;
-  border-radius:9px;font-size:13px;font-weight:600;
-  color:var(--lbl2);cursor:pointer;transition:all .18s;
-  user-select:none;
-}
-.tab.active{
-  background:var(--bg3);color:var(--lbl);
-  box-shadow:0 1px 4px rgba(0,0,0,.35);
-}
-.panel{display:none;padding:16px}
-.panel.active{display:block}
+    /* ═══════════════════════════════════════
+       LAYOUT
+    ═══════════════════════════════════════ */
+    .login-wrap {
+      min-height: 100dvh;
+      max-width: 430px; margin: 0 auto;
+      display: flex; flex-direction: column;
+      padding: calc(env(safe-area-inset-top, 0px) + 48px) 24px calc(env(safe-area-inset-bottom, 16px) + 32px);
+    }
 
-/* Form fields */
-.field{
-  background:var(--bg3);
-  border-radius:var(--r);
-  overflow:hidden;
-  margin-bottom:10px;
-}
-.field-row{
-  display:flex;align-items:center;
-  padding:13px 14px;
-  border-bottom:0.5px solid var(--sep);
-  gap:10px;
-}
-.field-row:last-child{border-bottom:none}
-.field-icon{font-size:16px;flex-shrink:0;opacity:.7}
-.field-input{
-  flex:1;background:transparent;border:none;outline:none;
-  font-size:15px;font-family:inherit;color:var(--lbl);
-  -webkit-appearance:none;
-}
-.field-input::placeholder{color:var(--lbl3)}
+    /* ═══════════════════════════════════════
+       BRAND
+    ═══════════════════════════════════════ */
+    .brand {
+      display: flex; flex-direction: column; align-items: center;
+      gap: 14px; margin-bottom: 48px;
+    }
+    .brand-logo {
+      width: 72px; height: 72px;
+      background: linear-gradient(145deg, var(--accent), #C41E3A);
+      border-radius: 20px;
+      display: flex; align-items: center; justify-content: center;
+      font-size: 36px;
+      box-shadow: 0 12px 40px rgba(255,45,85,.35);
+    }
+    .brand-name {
+      font-size: 28px; font-weight: 800; letter-spacing: -.8px;
+    }
+    .brand-name span { color: var(--accent); }
+    .brand-sub {
+      font-size: 14px; color: var(--lbl2); text-align: center; line-height: 1.5;
+    }
 
-/* Button */
-.btn{
-  display:flex;align-items:center;justify-content:center;
-  width:100%;padding:15px;border:none;border-radius:var(--r);
-  font-size:16px;font-weight:600;font-family:inherit;
-  cursor:pointer;transition:opacity .15s,transform .15s;
-  user-select:none;margin-top:4px;
-}
-.btn:active{transform:scale(.97);opacity:.85}
-.btn-green{background:var(--green);color:#fff;box-shadow:0 4px 20px rgba(48,209,88,.28)}
-.btn-blue {background:var(--blue); color:#fff;box-shadow:0 4px 20px rgba(10,132,255,.28)}
+    /* ═══════════════════════════════════════
+       ALERT (Flash messages)
+    ═══════════════════════════════════════ */
+    .alert {
+      border-radius: var(--r);
+      padding: 13px 16px; font-size: 14px; font-weight: 500;
+      margin-bottom: 20px; border-left: 3px solid;
+    }
+    .alert-error   { background: rgba(255,69,58,.12);  border-color: var(--red);   color: var(--red); }
+    .alert-success { background: rgba(48,209,88,.12);  border-color: var(--green); color: var(--green); }
+    .alert-info    { background: rgba(10,132,255,.12); border-color: #0A84FF;      color: #0A84FF; }
 
-/* Error */
-.error-box{
-  background:rgba(255,69,58,.12);
-  border:0.5px solid rgba(255,69,58,.3);
-  border-radius:var(--r);
-  padding:11px 14px;
-  font-size:13px;color:var(--red);
-  margin-bottom:12px;
-  line-height:1.4;
-}
+    /* ═══════════════════════════════════════
+       CARD FORM
+    ═══════════════════════════════════════ */
+    .card {
+      background: var(--bg2);
+      border: .5px solid var(--sep);
+      border-radius: var(--r-xl);
+      padding: 28px 20px;
+      margin-bottom: 20px;
+    }
+    .card-title {
+      font-size: 20px; font-weight: 700; margin-bottom: 24px;
+      text-align: center; letter-spacing: -.4px;
+    }
 
-.footer{
-  padding:16px;border-top:0.5px solid var(--sep);
-  text-align:center;font-size:12px;color:var(--lbl3);
-}
-</style>
+    /* ═══════════════════════════════════════
+       FIELD GROUP
+    ═══════════════════════════════════════ */
+    .field-group {
+      background: var(--bg3);
+      border-radius: var(--r-lg); overflow: hidden;
+      margin-bottom: 14px;
+    }
+    .field-row {
+      display: flex; align-items: center; gap: 12px;
+      padding: 0 16px;
+      border-bottom: .5px solid var(--sep);
+    }
+    .field-row:last-child { border-bottom: none; }
+    .field-icon { font-size: 16px; width: 22px; text-align: center; color: var(--lbl3); flex-shrink: 0; }
+    .field-input {
+      flex: 1; padding: 16px 0;
+      background: transparent; border: none; outline: none;
+      color: var(--lbl); font-size: 16px; font-family: inherit;
+    }
+    .field-input::placeholder { color: var(--lbl3); }
+    /* autofill — match dark bg */
+    .field-input:-webkit-autofill,
+    .field-input:-webkit-autofill:focus {
+      -webkit-box-shadow: 0 0 0 1000px var(--bg3) inset;
+      -webkit-text-fill-color: var(--lbl);
+      caret-color: var(--lbl);
+    }
+
+    /* ═══════════════════════════════════════
+       BUTTONS
+    ═══════════════════════════════════════ */
+    .btn-primary {
+      width: 100%; padding: 17px; border: none;
+      border-radius: var(--r-lg);
+      background: var(--accent); color: #fff;
+      font-size: 17px; font-weight: 700; font-family: inherit;
+      cursor: pointer;
+      box-shadow: 0 6px 28px rgba(255,45,85,.35);
+      transition: all .2s;
+      display: flex; align-items: center; justify-content: center; gap: 8px;
+    }
+    .btn-primary:active { transform: scale(.97); opacity: .85; }
+    .btn-primary.loading {
+      background: var(--bg4); box-shadow: none; color: var(--lbl2); pointer-events: none;
+    }
+
+    /* ═══════════════════════════════════════
+       LINKS
+    ═══════════════════════════════════════ */
+    .link-row {
+      text-align: center; font-size: 14px; color: var(--lbl2);
+      margin-top: 6px;
+    }
+    .link-row a { color: var(--accent); text-decoration: none; font-weight: 500; }
+    .link-row a:active { opacity: .7; }
+
+    /* ═══════════════════════════════════════
+       DIVIDER
+    ═══════════════════════════════════════ */
+    .divider {
+      display: flex; align-items: center; gap: 12px;
+      margin: 20px 0; color: var(--lbl3); font-size: 12px;
+    }
+    .divider::before, .divider::after {
+      content: ''; flex: 1; height: .5px; background: var(--sep);
+    }
+
+    /* ═══════════════════════════════════════
+       FEATURES LIST
+    ═══════════════════════════════════════ */
+    .features {
+      display: flex; flex-direction: column; gap: 10px;
+      margin-top: auto; padding-top: 32px;
+    }
+    .feat-item {
+      display: flex; align-items: center; gap: 12px;
+      font-size: 13px; color: var(--lbl2);
+    }
+    .feat-icon {
+      width: 32px; height: 32px; border-radius: 8px;
+      background: var(--bg3); display: flex; align-items: center;
+      justify-content: center; font-size: 15px; flex-shrink: 0;
+    }
+
+    /* ═══════════════════════════════════════
+       ANIMATIONS
+    ═══════════════════════════════════════ */
+    @keyframes fade-up {
+      from { opacity: 0; transform: translateY(16px); }
+      to   { opacity: 1; transform: translateY(0); }
+    }
+    .brand  { animation: fade-up .5s ease both; }
+    .alert  { animation: fade-up .3s ease both; }
+    .card   { animation: fade-up .5s .08s ease both; }
+    .link-row { animation: fade-up .5s .16s ease both; }
+    .features { animation: fade-up .5s .24s ease both; }
+
+    ::-webkit-scrollbar { width: 0; }
+  </style>
 </head>
 <body>
-<div class="card">
+<div class="login-wrap">
 
-  <!-- LOGO -->
-  <div class="logo">
-    <span class="logo-icon">📈</span>
-    <div class="logo-title">Profit <span>Cash</span></div>
-    <div class="logo-sub">Trading automatizado com IA</div>
+  <!-- BRAND -->
+  <div class="brand">
+    <div class="brand-logo">📈</div>
+    <div class="brand-name">Profit <span>Cash</span></div>
+    <div class="brand-sub">IA para operar no automático.<br>Conecte-se e comece a lucrar.</div>
   </div>
 
-  <!-- TABS -->
-  <div class="tabs">
-    <div class="tab {% if tab=='login' %}active{% endif %}" id="t-login" onclick="switchTab('login')">
-      Entrar
-    </div>
-    <div class="tab {% if tab=='register' %}active{% endif %}" id="t-register" onclick="switchTab('register')">
-      Criar conta
-    </div>
+  <!-- FLASH MESSAGES -->
+  {% for category, msg in get_flashed_messages(with_categories=true) %}
+  <div class="alert alert-{{ 'error' if category == 'error' else 'success' if category == 'success' else 'info' }}">
+    {{ msg }}
   </div>
+  {% endfor %}
 
-  <!-- PANEL LOGIN -->
-  <div class="panel {% if tab=='login' or not tab %}active{% endif %}" id="p-login">
-    {% if error and tab != 'register' %}
-    <div class="error-box">{{ error }}</div>
-    {% endif %}
-    <form method="POST">
-      <input type="hidden" name="action" value="login">
-      <div class="field">
-        <div class="field-row">
-          <span class="field-icon">✉️</span>
-          <input class="field-input" type="email" name="email" placeholder="seu@email.com"
-            autocomplete="email" required>
-        </div>
-        <div class="field-row">
-          <span class="field-icon">🔒</span>
-          <input class="field-input" type="password" name="password" placeholder="Senha"
-            autocomplete="current-password" required>
-        </div>
-      </div>
-      <button type="submit" class="btn btn-green">Entrar</button>
-    </form>
-  </div>
+  {% if error %}
+  <div class="alert alert-error">{{ error }}</div>
+  {% endif %}
 
-  <!-- PANEL REGISTER -->
-  <div class="panel {% if tab=='register' %}active{% endif %}" id="p-register">
-    {% if error and tab == 'register' %}
-    <div class="error-box">{{ error }}</div>
-    {% endif %}
-    <form method="POST">
-      <input type="hidden" name="action" value="register">
-      <div class="field">
+  <!-- FORM -->
+  <div class="card">
+    <div class="card-title">Entrar na sua conta</div>
+
+    <form method="POST" action="{{ url_for('login') if url_for else '/login' }}" id="form-login">
+      <div class="field-group">
         <div class="field-row">
           <span class="field-icon">👤</span>
-          <input class="field-input" type="text" name="username" placeholder="Seu nome"
-            autocomplete="name" required>
-        </div>
-        <div class="field-row">
-          <span class="field-icon">✉️</span>
-          <input class="field-input" type="email" name="email" placeholder="seu@email.com"
-            autocomplete="email" required>
+          <input
+            class="field-input"
+            type="text"
+            name="username"
+            id="username"
+            placeholder="Usuário ou e-mail"
+            autocomplete="username"
+            autocapitalize="none"
+            spellcheck="false"
+            required
+            value="{{ username_val or '' }}"
+          >
         </div>
         <div class="field-row">
           <span class="field-icon">🔒</span>
-          <input class="field-input" type="password" name="password" placeholder="Senha (mín. 6 caracteres)"
-            autocomplete="new-password" required minlength="6">
+          <input
+            class="field-input"
+            type="password"
+            name="password"
+            id="password"
+            placeholder="Senha"
+            autocomplete="current-password"
+            required
+          >
         </div>
       </div>
-      <button type="submit" class="btn btn-blue">Criar conta</button>
+
+      <button class="btn-primary" type="submit" id="btn-submit">
+        Entrar
+      </button>
     </form>
   </div>
 
-  <div class="footer">Profit Cash · Powered by Deriv API</div>
+  <!-- LINKS -->
+  {% if register_url %}
+  <div class="link-row">
+    Não tem conta? <a href="{{ register_url }}">Criar conta</a>
+  </div>
+  {% endif %}
+
+  <!-- FEATURES -->
+  <div class="features">
+    <div class="feat-item">
+      <div class="feat-icon">🤖</div>
+      <span>IA analisa o mercado e opera no automático</span>
+    </div>
+    <div class="feat-item">
+      <div class="feat-icon">📊</div>
+      <span>Gráficos ao vivo com múltiplos pares</span>
+    </div>
+    <div class="feat-item">
+      <div class="feat-icon">🔒</div>
+      <span>Token Deriv protegido com criptografia</span>
+    </div>
+    <div class="feat-item">
+      <div class="feat-icon">📈</div>
+      <span>Martingale inteligente com gestão de risco</span>
+    </div>
+  </div>
+
 </div>
 
 <script>
-function switchTab(name) {
-  ['login','register'].forEach(t => {
-    document.getElementById('t-'+t).classList.toggle('active', t===name);
-    document.getElementById('p-'+t).classList.toggle('active', t===name);
+  /* Loading state on submit */
+  document.getElementById('form-login').addEventListener('submit', function(){
+    const btn = document.getElementById('btn-submit');
+    btn.classList.add('loading');
+    btn.textContent = 'Entrando...';
   });
-}
+
+  /* Focus first empty field */
+  window.addEventListener('DOMContentLoaded', () => {
+    const u = document.getElementById('username');
+    const p = document.getElementById('password');
+    if (!u.value) u.focus();
+    else p.focus();
+  });
 </script>
 </body>
 </html>
