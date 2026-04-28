@@ -148,6 +148,18 @@
     .btn-primary.loading {
       background: var(--bg4); box-shadow: none; color: var(--lbl2); pointer-events: none;
     }
+    .btn-secondary {
+      width: 100%; padding: 17px; border: 1.5px solid var(--sep);
+      border-radius: var(--r-lg);
+      background: transparent; color: var(--lbl2);
+      font-size: 15px; font-weight: 600; font-family: inherit;
+      cursor: pointer;
+      transition: all .2s;
+      display: flex; align-items: center; justify-content: center; gap: 8px;
+      text-decoration: none;
+    }
+    .btn-secondary:active { transform: scale(.97); opacity: .7; }
+    .btn-secondary:hover  { border-color: var(--accent); color: var(--accent); }
 
     /* ═══════════════════════════════════════
        LINKS
@@ -263,6 +275,17 @@
         Entrar
       </button>
     </form>
+
+    <div class="divider">Não tem conta na corretora?</div>
+
+    <a
+      class="btn-secondary"
+      href="https://deriv.partners/rx?sidc=EF6BE521-1809-4A1B-92F5-29F0D6C8CBA8&utm_campaign=dynamicworks&utm_medium=affiliate&utm_source=CU310980"
+      target="_blank"
+      rel="noopener noreferrer"
+    >
+      🏦 Abrir conta gratuita na Deriv
+    </a>
   </div>
 
   <!-- LINKS -->
