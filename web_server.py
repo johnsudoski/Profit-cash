@@ -448,13 +448,39 @@ def check_3candle_confirm(prices: list, direction: str,
     """
     Verifica se as últimas 3 micro-velas confirmam a direção.
 
-    Cada micro-vela = `candle_size` ticks (padrão 5).
+    candle_size > 1: `prices` é uma série CRUA de ticks (modo synthetic),
+                      agrupada aqui em micro-velas de `candle_size` ticks
+                      (open=primeiro tick do grupo, close=último).
+    candle_size == 1: `prices` já é uma série de CLOSES, um valor por candle
+                      (candle_buf, modo forex) — "abertura" de cada candle é
+                      o close do candle anterior. NÃO tratar como caso geral
+                      de candle_size>1: ali open_p e close_p cairiam no MESMO
+                      índice (start == end-1), ficando sempre iguais e a
+                      confirmação NUNCA passaria — bug que travava o robô em
+                      forex sem nenhum erro visível (parecia "não conectar").
+
     Confirmação:
       CALL → as 3 últimas velas fecharam ACIMA da abertura (bullish)
       PUT  → as 3 últimas velas fecharam ABAIXO da abertura (bearish)
 
     Retorna True se as 3 velas confirmam, False caso contrário.
     """
+    if candle_size <= 1:
+        if len(prices) < 4:   # 3 candles + 1 de referência (close anterior)
+            return False
+        confirmed = 0
+        for i in range(3):
+            idx     = len(prices) - 1 - i
+            close_p = prices[idx]
+            open_p  = prices[idx - 1]   # close do candle anterior
+            if direction == "CALL" and close_p > open_p:
+                confirmed += 1
+            elif direction == "PUT" and close_p < open_p:
+                confirmed += 1
+            else:
+                break
+        return confirmed == 3
+
     needed = candle_size * 3 + 1
     if len(prices) < needed:
         return False
