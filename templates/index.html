@@ -223,6 +223,11 @@
     .btn-start:active { transform:scale(.97); opacity:.85; }
     .btn-start.loading { background:var(--bg4); box-shadow:none; color:var(--lbl2); }
     .btn-stop { background:var(--bg4); color:var(--red); box-shadow:none; }
+    .btn-stop-live {
+      width:100%; padding:14px; margin-top:14px; border:1px solid var(--red);
+      border-radius:var(--r-lg); background:transparent; color:var(--red);
+      font-size:15px; font-weight:700; font-family:inherit; cursor:pointer;
+    }
 
     /* ═══════════════════════════════════════
        ANALYZING SCREEN
@@ -648,7 +653,7 @@
       <!-- SCREEN: ANALYZING -->
       <div class="screen analyzing-screen" id="screen-analyzing">
         <div class="analyzing-title">IA analisando<br><span class="acc">o mercado...</span></div>
-        <div class="analyzing-sub">Otimizando a próxima entrada</div>
+        <div class="analyzing-sub" id="analyzing-sub">Otimizando a próxima entrada</div>
         <div class="checklist">
           <div class="chk-item" id="chk1"><div class="chk-ring" id="cr1"></div><span class="chk-text">IA iniciada</span></div>
           <div class="chk-item" id="chk2"><div class="chk-ring" id="cr2"></div><span class="chk-text">Buscando dados do mercado</span></div>
@@ -702,6 +707,7 @@
         <p class="section-title">Ciclo Martingale</p>
         <div class="mlist" id="mlist"></div>
         <div class="live-warn">🔒 Não feche o app — o bot continua operando</div>
+        <button class="btn-stop-live" onclick="stopBot()">⏹&nbsp; Parar operação</button>
       </div><!-- /live -->
 
       <!-- SCREEN: RESULT -->
@@ -832,9 +838,13 @@
     <div class="modal-handle"></div>
     <div class="modal-title">🔑 Conectar Deriv</div>
     <div class="modal-desc">
-      Acesse sua conta Deriv → Configurações → Segurança → Tokens de API.<br>
-      Crie um token com permissões de <strong>Leitura</strong> e <strong>Trade</strong>.
+      Crie um token com permissões de <strong>Leitura</strong> e <strong>Trade</strong>
+      direto na Deriv, depois cole abaixo.
     </div>
+    <a class="btn-secondary" style="display:block;text-align:center;text-decoration:none;border:1px solid var(--sep);margin-bottom:14px"
+       href="https://app.deriv.com/account/api-token" target="_blank" rel="noopener noreferrer">
+      🔗&nbsp; Abrir página de tokens da Deriv
+    </a>
     <div class="modal-field">
       <input class="modal-input" type="password" id="token-input"
         placeholder="Cole seu token aqui..." autocomplete="off">
@@ -882,10 +892,20 @@ function connectWS(){
 
 function handle(m){
   if(m.type==='estado') onEstado(m.data);
-  else if(m.type==='log') {}
+  else if(m.type==='log') onLog(m);
   else if(m.type==='sinal') onSinal(m);
   else if(m.type==='trade') onTrade(m);
   else if(m.type==='resultado') onResultado(m);
+}
+
+/* Mostra o log real do robô enquanto a tela "analisando" está parada
+   esperando o primeiro sinal — sem isso, o usuário vê a barra travada
+   em 95% sem nenhuma explicação (parece que não conectou). */
+function onLog(m){
+  const scr = document.getElementById('screen-analyzing');
+  if(!scr || !scr.classList.contains('active')) return;
+  const sub = document.getElementById('analyzing-sub');
+  if(sub && m.text) sub.textContent = m.text;
 }
 
 /* ═══════════════════════════════════════════════════════
@@ -1036,6 +1056,7 @@ function repeatTrading(){ S.mSteps=[]; showScreen('config'); startBot(); }
 ═══════════════════════════════════════════════════════ */
 function startAnalyzing(){
   showScreen('analyzing');
+  document.getElementById('analyzing-sub').textContent='Otimizando a próxima entrada';
   [1,2,3,4,5].forEach(i=>{ document.getElementById('chk'+i).className='chk-item'; document.getElementById('cr'+i).textContent=''; });
   document.getElementById('prog-fill').style.width='0%';
   const timings=[[350,20],[800,40],[1400,60],[2100,80],[2900,95]];
