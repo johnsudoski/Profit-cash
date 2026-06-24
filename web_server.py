@@ -44,22 +44,61 @@ TICTO_PRODUCT_ID     = os.environ.get("TICTO_PRODUCT_ID", "")        # filtrar p
 TICTO_COURSE_URL     = os.environ.get("TICTO_COURSE_URL", "")         # link de compra do curso
 TICTO_DAYS           = int("".join(c for c in os.environ.get("TICTO_DAYS", "180") if c.isdigit()) or "180")
 
-ASSETS = ["R_75", "R_100", "R_50", "R_25", "R_10"]
-ASSET_NAMES = {
-    "R_75":  "Volatility 75",
-    "R_100": "Volatility 100",
-    "R_50":  "Volatility 50",
-    "R_25":  "Volatility 25",
-    "R_10":  "Volatility 10",
+# ── MARKET_MODE ──────────────────────────────────────────────────────────────
+# "forex"     → pares reais na Deriv (frx*). Preço externo e notícia têm efeito real.
+# "synthetic" → Volatility Indices (R_*). RNG da própria Deriv, 24/7, sem correlação
+#               com mercado real — rollback instantâneo (restart, sem redeploy de código)
+#               se algo falhar em produção no modo forex.
+MARKET_MODE = os.environ.get("MARKET_MODE", "forex")
+
+# Tamanho do candle agregado (segundos) usado pelas funções de sinal em modo forex.
+# Em sintéticos a taxa de chegada de tick é estável (~1/s), então período fixo em
+# nº de ticks sempre representa o mesmo tempo de parede. Em forex real essa taxa
+# varia (Ásia calma vs. London/NY overlap), então as 3 funções de sinal passam a
+# consumir candle_buf (closes agregados por tempo) em vez de tick_buf cru.
+CANDLE_SECONDS = int(os.environ.get("CANDLE_SECONDS", "30"))
+
+ASSETS_BY_MODE = {
+    "synthetic": ["R_75", "R_100", "R_50", "R_25", "R_10"],
+    "forex":     ["frxEURUSD", "frxGBPUSD", "frxUSDJPY", "frxAUDUSD"],
 }
-STRATEGIES = {
-    # duracao: em TICKS (duracao_unit: "t")
-    # 5 ticks ≈ 5 segundos nos índices sintéticos da Deriv
-    # Deriv não aceita duration_unit "s" < 15s — ticks é o menor contrato disponível
-    "cautelosa": {"duracao": 5, "duracao_unit": "t", "rsi_upper": 75, "rsi_lower": 25, "conf_min": 0.78, "stop_diario_pct": 0.30},
-    "moderada":  {"duracao": 5, "duracao_unit": "t", "rsi_upper": 70, "rsi_lower": 30, "conf_min": 0.70, "stop_diario_pct": 0.30},
-    "agressiva": {"duracao": 5, "duracao_unit": "t", "rsi_upper": 65, "rsi_lower": 35, "conf_min": 0.62, "stop_diario_pct": 0.30},
+ASSET_NAMES_BY_MODE = {
+    "synthetic": {
+        "R_75":  "Volatility 75",
+        "R_100": "Volatility 100",
+        "R_50":  "Volatility 50",
+        "R_25":  "Volatility 25",
+        "R_10":  "Volatility 10",
+    },
+    "forex": {
+        "frxEURUSD": "EUR/USD",
+        "frxGBPUSD": "GBP/USD",
+        "frxUSDJPY": "USD/JPY",
+        "frxAUDUSD": "AUD/USD",
+    },
 }
+STRATEGIES_BY_MODE = {
+    "synthetic": {
+        # duracao: em TICKS (duracao_unit: "t")
+        # 5 ticks ≈ 5 segundos nos índices sintéticos da Deriv
+        # Deriv não aceita duration_unit "s" < 15s — ticks é o menor contrato disponível
+        "cautelosa": {"duracao": 5, "duracao_unit": "t", "rsi_upper": 75, "rsi_lower": 25, "conf_min": 0.78, "stop_diario_pct": 0.30},
+        "moderada":  {"duracao": 5, "duracao_unit": "t", "rsi_upper": 70, "rsi_lower": 30, "conf_min": 0.70, "stop_diario_pct": 0.30},
+        "agressiva": {"duracao": 5, "duracao_unit": "t", "rsi_upper": 65, "rsi_lower": 35, "conf_min": 0.62, "stop_diario_pct": 0.30},
+    },
+    "forex": {
+        # duracao: em SEGUNDOS (duracao_unit: "s") — placeholder conservador.
+        # Fase 2 (contracts_for) descobre dinamicamente a duração real disponível
+        # por símbolo e sobrescreve isso por-ativo em runtime.
+        "cautelosa": {"duracao": 60, "duracao_unit": "s", "rsi_upper": 75, "rsi_lower": 25, "conf_min": 0.78, "stop_diario_pct": 0.30},
+        "moderada":  {"duracao": 60, "duracao_unit": "s", "rsi_upper": 70, "rsi_lower": 30, "conf_min": 0.70, "stop_diario_pct": 0.30},
+        "agressiva": {"duracao": 60, "duracao_unit": "s", "rsi_upper": 65, "rsi_lower": 35, "conf_min": 0.62, "stop_diario_pct": 0.30},
+    },
+}
+
+ASSETS      = ASSETS_BY_MODE[MARKET_MODE]
+ASSET_NAMES = ASSET_NAMES_BY_MODE[MARKET_MODE]
+STRATEGIES  = STRATEGIES_BY_MODE[MARKET_MODE]
 
 
 # ════════════════════════════════════════════════════════
@@ -585,6 +624,43 @@ def get_candle_5m(history: list) -> dict | None:
     }
 
 
+def build_candles(history: list, candle_seconds: int = 30, min_ticks_per_candle: int = 2) -> list:
+    """
+    Agrega tick_history[asset] = [(price, ts), ...] em candles de `candle_seconds`
+    segundos, alinhados ao relógio de parede (candle_start = ts - ts % candle_seconds).
+
+    Retorna lista de CLOSES (float), em ordem cronológica, contendo só candles
+    COMPLETOS (exclui o candle corrente, ainda em formação). Um candle só entra
+    no resultado se tiver >= min_ticks_per_candle ticks — evita close artificial
+    em gap de liquidez (ex: virada de sessão, mercado calmo).
+
+    Usado pelas 3 funções de sinal reais (detect_bb_squeeze_signal, calc_trend,
+    check_3candle_confirm) no lugar do tick_buf cru, para que os períodos fixos
+    (20, 65 candles etc.) representem sempre o mesmo tempo de parede — algo que
+    "N ticks" não garante em forex (taxa de chegada varia por sessão/par).
+    """
+    if not history:
+        return []
+
+    now           = time.time()
+    current_start = now - (now % candle_seconds)
+
+    buckets: dict = {}
+    for price, ts in history:
+        bucket_start = ts - (ts % candle_seconds)
+        if bucket_start >= current_start:
+            continue  # candle corrente — ainda em formação, não entra no resultado
+        buckets.setdefault(bucket_start, []).append(price)
+
+    closes = []
+    for bucket_start in sorted(buckets.keys()):
+        prices_in_bucket = buckets[bucket_start]
+        if len(prices_in_bucket) < min_ticks_per_candle:
+            continue
+        closes.append(prices_in_bucket[-1])
+    return closes
+
+
 def calc_signal(prices: list, config: dict):
     """
     Sinal v4 — Multi-timeframe + 8 filtros expandidos:
@@ -800,6 +876,11 @@ async def _deriv_bot_async(ss: SessionState, token: str, valor_brl: float,
     # ── Histórico para reconstrução de vela de 5 minutos ─────────────────────
     # Cada entrada: (price, timestamp) — mantido em sincronia com tick_buf
     tick_history = {a: [] for a in ASSETS}
+    # ── Candles agregados por tempo (CANDLE_SECONDS) — input das 3 funções de
+    # sinal reais em modo forex. Recalculado a cada tick via build_candles().
+    # tick_buf cru continua sendo a fonte do preço de execução (entry/exit) —
+    # nunca trocar isso pelo candle, que só atualiza periodicamente.
+    candle_buf = {a: [] for a in ASSETS}
     # ── Ranking dinâmico: histórico com timestamp para calcular melhor ativo ──
     # Cada entrada: {"ts": float, "won": bool}  (mantém só últimas 2h)
     asset_log = {a: [] for a in ASSETS}
@@ -1145,10 +1226,24 @@ async def _deriv_bot_async(ss: SessionState, token: str, valor_brl: float,
                         _tnow = time.time()
                         tick_times[asset].append(_tnow)
                         tick_times[asset] = [t for t in tick_times[asset] if _tnow - t <= 60]
-                        # ── Histórico para vela de 5 minutos ───────────────
+                        # ── Histórico para candles agregados ────────────────
+                        # Prune por JANELA DE TEMPO (2h), não por contagem fixa de
+                        # itens — em forex a taxa de chegada de tick varia muito
+                        # (Ásia calma vs. London/NY overlap), então um cap fixo de
+                        # N ticks pode cobrir só alguns minutos em sessão ativa e
+                        # nunca acumular os ~65 candles (32min @ 30s) necessários
+                        # para a estratégia rodar. Janela de tempo garante cobertura
+                        # consistente independente do tick rate.
                         tick_history[asset].append((price, _tnow))
-                        if len(tick_history[asset]) > 500:
-                            tick_history[asset] = tick_history[asset][-500:]
+                        _hist_cutoff = _tnow - 7200  # 2h
+                        if tick_history[asset][0][1] < _hist_cutoff:
+                            tick_history[asset] = [
+                                (p, t) for p, t in tick_history[asset] if t >= _hist_cutoff
+                            ]
+                        if MARKET_MODE == "forex":
+                            candle_buf[asset] = build_candles(
+                                tick_history[asset], CANDLE_SECONDS
+                            )
 
                         # ── Liquidar contratos expirados a cada tick ────────
                         now = time.time()
@@ -1318,7 +1413,12 @@ async def _deriv_bot_async(ss: SessionState, token: str, valor_brl: float,
                         #   LOSS → multiplica por 2.2 (até Round 5, depois para)
                         #   R$5 → R$11 → R$24 → R$53 → R$117 → R$258
                         # ════════════════════════════════════════════════════
-                        buf = tick_buf[asset]
+                        # Em forex, as 3 funções de sinal consomem candle_buf (closes
+                        # agregados por CANDLE_SECONDS) em vez do tick cru — período
+                        # fixo (65) passa a significar 65 CANDLES, tempo de parede
+                        # consistente independente da taxa de chegada de tick.
+                        # Em synthetic, comportamento 100% preservado (tick cru).
+                        buf = candle_buf[asset] if MARKET_MODE == "forex" else tick_buf[asset]
                         if len(buf) < 65:   # mínimo para calcular BB histórico
                             continue
 
@@ -1341,9 +1441,11 @@ async def _deriv_bot_async(ss: SessionState, token: str, valor_brl: float,
                             continue   # sinal contra a tendência, ignorar
 
                         # ── FILTRO 2: Confirmação de 3 micro-velas ───────────
-                        # 3 velas consecutivas de 5 ticks cada devem fechar
-                        # na mesma direção do sinal (todas bullish ou todas bearish).
-                        if not check_3candle_confirm(buf, direction, candle_size=5):
+                        # Em forex, buf já é candle_buf (cada elemento é 1 candle
+                        # completo de CANDLE_SECONDS) → candle_size=1. Em synthetic,
+                        # buf é tick cru e cada "vela" continua sendo 5 ticks.
+                        _candle_size = 1 if MARKET_MODE == "forex" else 5
+                        if not check_3candle_confirm(buf, direction, candle_size=_candle_size):
                             continue   # sem confirmação das 3 velas, não operar
 
                         # Confiança: quanto mais forte o squeeze, mais confiante

@@ -729,12 +729,13 @@
     <div class="page charts-page" id="page-charts">
       <div class="page-title">📊 Gráfico ao vivo</div>
       <div class="pair-scroll" id="pair-scroll">
-        <div class="pair-chip active" onclick="selectPair(this,'USDJPY')">USD/JPY</div>
-        <div class="pair-chip" onclick="selectPair(this,'EURUSD')">EUR/USD</div>
+        <!-- Pares alinhados a ASSETS_BY_MODE["forex"] em web_server.py — só exibe
+             o que o robô realmente opera (antes tinha EUR/JPY e GBP/JPY decorativos
+             que não existem no backend). -->
+        <div class="pair-chip active" onclick="selectPair(this,'EURUSD')">EUR/USD</div>
         <div class="pair-chip" onclick="selectPair(this,'GBPUSD')">GBP/USD</div>
+        <div class="pair-chip" onclick="selectPair(this,'USDJPY')">USD/JPY</div>
         <div class="pair-chip" onclick="selectPair(this,'AUDUSD')">AUD/USD</div>
-        <div class="pair-chip" onclick="selectPair(this,'EURJPY')">EUR/JPY</div>
-        <div class="pair-chip" onclick="selectPair(this,'GBPJPY')">GBP/JPY</div>
       </div>
       <div class="tf-row">
         <div class="tf-btn active" onclick="selectTF(this,'1m')">1m</div>
