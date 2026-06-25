@@ -1296,6 +1296,29 @@ async def _deriv_bot_async(ss: SessionState, token: str, valor_brl: float,
                                 f"STOCH {stk:.0f} | {bb_info}",
                                 "info"
                             )
+                            # ── Diagnóstico de candle_buf (forex) — sem isso não
+                            # dá pra saber se está esquentando ou se já tem dados
+                            # suficientes e só não achou squeeze+breakout ainda.
+                            if MARKET_MODE == "forex":
+                                _cbuf = candle_buf[asset]
+                                _tspeed = len(tick_times[asset])
+                                if len(_cbuf) < 65:
+                                    ss.log(
+                                        f"⏳ {ASSET_NAMES.get(asset,asset)} | "
+                                        f"aquecendo: {len(_cbuf)}/65 candles | "
+                                        f"{_tspeed} ticks/60s",
+                                        "info"
+                                    )
+                                else:
+                                    _sig, _sqz = detect_bb_squeeze_signal(_cbuf)
+                                    _trd = calc_trend(_cbuf, fast=10, slow=30)
+                                    ss.log(
+                                        f"📐 {ASSET_NAMES.get(asset,asset)} | "
+                                        f"squeeze {_sqz*100:.0f}% (precisa ≤65%) | "
+                                        f"trend {_trd} | sinal {_sig or '--'} | "
+                                        f"{_tspeed} ticks/60s",
+                                        "info"
+                                    )
                             # ── Ranking dinâmico das últimas 2h ──────────────
                             _now_ts  = time.time()
                             _cutoff2 = _now_ts - _TWO_HOURS
