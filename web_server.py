@@ -56,7 +56,10 @@ MARKET_MODE = os.environ.get("MARKET_MODE", "forex")
 # nº de ticks sempre representa o mesmo tempo de parede. Em forex real essa taxa
 # varia (Ásia calma vs. London/NY overlap), então as 3 funções de sinal passam a
 # consumir candle_buf (closes agregados por tempo) em vez de tick_buf cru.
-CANDLE_SECONDS = int(os.environ.get("CANDLE_SECONDS", "30"))
+CANDLE_SECONDS = int(os.environ.get("CANDLE_SECONDS", "10"))
+# 65 candles minimos (period*3+5 do detect_bb_squeeze_signal) x 10s = ~11min de
+# aquecimento, em vez de ~32min com o default anterior de 30s. Configurável via
+# env var CANDLE_SECONDS no Railway se quiser ajustar sem precisar de outro deploy.
 
 ASSETS_BY_MODE = {
     "synthetic": ["R_75", "R_100", "R_50", "R_25", "R_10"],
