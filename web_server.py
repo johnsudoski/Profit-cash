@@ -1267,9 +1267,20 @@ async def _deriv_bot_async(ss: SessionState, token: str, valor_brl: float,
                                 (p, t) for p, t in tick_history[asset] if t >= _hist_cutoff
                             ]
                         if MARKET_MODE == "forex":
-                            candle_buf[asset] = build_candles(
-                                tick_history[asset], CANDLE_SECONDS
-                            )
+                            # Blindado: isso é código novo (Fase 1). Um bug aqui
+                            # NUNCA deve derrubar a conexão inteira com a Deriv —
+                            # antes disso não tinha try/except e uma excecao subia
+                            # até o handler genérico do loop, fechava a conexão e
+                            # logava só "Robô desconectado." (a mensagem real do
+                            # erro era sobrescrita 1 log depois, invisível no app).
+                            try:
+                                candle_buf[asset] = build_candles(
+                                    tick_history[asset], CANDLE_SECONDS
+                                )
+                            except Exception as _e_candle:
+                                import traceback
+                                ss.log(f"❌ build_candles falhou ({asset}): {_e_candle}", "loss")
+                                print(f"[CANDLE_BUF ERROR] {traceback.format_exc()}", flush=True)
 
                         # ── Liquidar contratos expirados a cada tick ────────
                         now = time.time()
@@ -1299,26 +1310,33 @@ async def _deriv_bot_async(ss: SessionState, token: str, valor_brl: float,
                             # ── Diagnóstico de candle_buf (forex) — sem isso não
                             # dá pra saber se está esquentando ou se já tem dados
                             # suficientes e só não achou squeeze+breakout ainda.
+                            # Blindado pelo mesmo motivo do build_candles acima —
+                            # log de diagnóstico NUNCA pode derrubar a conexão.
                             if MARKET_MODE == "forex":
-                                _cbuf = candle_buf[asset]
-                                _tspeed = len(tick_times[asset])
-                                if len(_cbuf) < 65:
-                                    ss.log(
-                                        f"⏳ {ASSET_NAMES.get(asset,asset)} | "
-                                        f"aquecendo: {len(_cbuf)}/65 candles | "
-                                        f"{_tspeed} ticks/60s",
-                                        "info"
-                                    )
-                                else:
-                                    _sig, _sqz = detect_bb_squeeze_signal(_cbuf)
-                                    _trd = calc_trend(_cbuf, fast=10, slow=30)
-                                    ss.log(
-                                        f"📐 {ASSET_NAMES.get(asset,asset)} | "
-                                        f"squeeze {_sqz*100:.0f}% (precisa ≤65%) | "
-                                        f"trend {_trd} | sinal {_sig or '--'} | "
-                                        f"{_tspeed} ticks/60s",
-                                        "info"
-                                    )
+                                try:
+                                    _cbuf = candle_buf[asset]
+                                    _tspeed = len(tick_times[asset])
+                                    if len(_cbuf) < 65:
+                                        ss.log(
+                                            f"⏳ {ASSET_NAMES.get(asset,asset)} | "
+                                            f"aquecendo: {len(_cbuf)}/65 candles | "
+                                            f"{_tspeed} ticks/60s",
+                                            "info"
+                                        )
+                                    else:
+                                        _sig, _sqz = detect_bb_squeeze_signal(_cbuf)
+                                        _trd = calc_trend(_cbuf, fast=10, slow=30)
+                                        ss.log(
+                                            f"📐 {ASSET_NAMES.get(asset,asset)} | "
+                                            f"squeeze {_sqz*100:.0f}% (precisa ≤65%) | "
+                                            f"trend {_trd} | sinal {_sig or '--'} | "
+                                            f"{_tspeed} ticks/60s",
+                                            "info"
+                                        )
+                                except Exception as _e_diag:
+                                    import traceback
+                                    ss.log(f"❌ diagnóstico forex falhou ({asset}): {_e_diag}", "loss")
+                                    print(f"[DIAG ERROR] {traceback.format_exc()}", flush=True)
                             # ── Ranking dinâmico das últimas 2h ──────────────
                             _now_ts  = time.time()
                             _cutoff2 = _now_ts - _TWO_HOURS
