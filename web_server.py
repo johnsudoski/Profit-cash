@@ -96,6 +96,80 @@ async def deriv_get_authenticated_ws_url(token: str, account_id: str) -> str:
         raise Exception(f"resposta sem URL: {data}")
     return url
 
+
+# ── DESCOBERTA DE DURAÇÃO REAL POR ATIVO (contracts_for) ─────────────────────
+# Em sintéticos, CALL/PUT de 5 ticks (~5s) sempre existe. Em forex real isso
+# NÃO é garantido — confirmado empiricamente (2026-06-25): frxEURUSD/GBPUSD/
+# USDJPY/AUDUSD só oferecem CALL/PUT a partir de 15 MINUTOS (expiry_type
+# "intraday"; "daily" também existe mas é ainda mais longo, 1-365 dias).
+# Em vez de chumbar esse número, descobre via contracts_for por símbolo.
+_contract_specs_cache = {}  # symbol -> (timestamp, {"duracao": int, "duracao_unit": str})
+_CONTRACT_SPECS_TTL = 3600  # 1h — contracts_for não muda a cada minuto
+
+
+def _parse_deriv_duration(s: str):
+    """Converte string de duração da Deriv ('15m','1d','5t','30s') em (número, unidade)."""
+    if not s or len(s) < 2:
+        return 60, "s"
+    unit = s[-1]
+    try:
+        num = int(s[:-1])
+    except ValueError:
+        return 60, "s"
+    return num, unit
+
+
+def _duration_to_seconds(duracao: int, unit: str, tick_seconds: float = 1.5) -> float:
+    """Converte (duracao, unit) em segundos. unit pode ser 't'(tick)/'s'/'m'/'h'/'d'.
+    Generaliza o que antes só tratava 't' e 's' explicitamente e quebrava
+    silenciosamente (multiplicando por 60) se viesse 'h' ou 'd' de contracts_for
+    (acontece quando só existe expiry_type 'daily' pra um símbolo)."""
+    return {
+        "t": duracao * tick_seconds,
+        "s": duracao,
+        "m": duracao * 60,
+        "h": duracao * 3600,
+        "d": duracao * 86400,
+    }.get(unit, duracao)
+
+
+async def fetch_contract_specs(dws, symbol: str):
+    """
+    Consulta contracts_for para `symbol` e descobre a menor duração CALL/PUT
+    disponível (prioriza expiry_type 'intraday' sobre 'daily'). Cacheia por
+    símbolo (TTL 1h).
+
+    IMPORTANTE: só pode ser chamada ANTES de qualquer subscribe de tick/
+    balance na mesma conexão — usa recv() direto (request/response simples),
+    e isso colidiria com o loop principal de mensagens (async for msg in dws)
+    se houver subscriptions ativas disputando as mensagens que chegam.
+
+    Retorna {"duracao": int, "duracao_unit": str} ou None se não encontrar
+    (o caller deve usar o valor padrão do STRATEGIES_BY_MODE como fallback).
+    """
+    now = time.time()
+    cached = _contract_specs_cache.get(symbol)
+    if cached and (now - cached[0]) < _CONTRACT_SPECS_TTL:
+        return cached[1]
+    try:
+        await dws.send(json.dumps({"contracts_for": symbol}))
+        raw = await asyncio.wait_for(dws.recv(), timeout=15)
+        msg = json.loads(raw)
+    except Exception:
+        return None
+    if "error" in msg:
+        return None
+    avail = msg.get("contracts_for", {}).get("available", [])
+    candidates = [c for c in avail if c.get("contract_type") in ("CALL", "PUT")]
+    intraday = [c for c in candidates if c.get("expiry_type") == "intraday"]
+    pick = intraday[0] if intraday else (candidates[0] if candidates else None)
+    if not pick:
+        return None
+    duracao, unit = _parse_deriv_duration(pick.get("min_contract_duration", ""))
+    spec = {"duracao": duracao, "duracao_unit": unit}
+    _contract_specs_cache[symbol] = (now, spec)
+    return spec
+
 # ── Ticto / Assinatura ───────────────────────────────────────────────────────
 # TICTO_MODE=open  → todos têm acesso (desenvolvimento / testes)
 # TICTO_MODE=strict → só quem comprou na Ticto tem acesso
@@ -151,12 +225,14 @@ STRATEGIES_BY_MODE = {
         "agressiva": {"duracao": 5, "duracao_unit": "t", "rsi_upper": 65, "rsi_lower": 35, "conf_min": 0.62, "stop_diario_pct": 0.30},
     },
     "forex": {
-        # duracao: em SEGUNDOS (duracao_unit: "s") — placeholder conservador.
-        # Fase 2 (contracts_for) descobre dinamicamente a duração real disponível
-        # por símbolo e sobrescreve isso por-ativo em runtime.
-        "cautelosa": {"duracao": 60, "duracao_unit": "s", "rsi_upper": 75, "rsi_lower": 25, "conf_min": 0.78, "stop_diario_pct": 0.30},
-        "moderada":  {"duracao": 60, "duracao_unit": "s", "rsi_upper": 70, "rsi_lower": 30, "conf_min": 0.70, "stop_diario_pct": 0.30},
-        "agressiva": {"duracao": 60, "duracao_unit": "s", "rsi_upper": 65, "rsi_lower": 35, "conf_min": 0.62, "stop_diario_pct": 0.30},
+        # duracao: em MINUTOS (duracao_unit: "m") — fallback caso fetch_contract_specs
+        # falhe. Confirmado via contracts_for real (2026-06-25): frxEURUSD/GBPUSD/
+        # USDJPY/AUDUSD só oferecem CALL/PUT a partir de 15min (expiry_type "intraday"),
+        # bem diferente do segundo/tick que synthetic permite. fetch_contract_specs()
+        # descobre o valor real por símbolo e sobrescreve isso em runtime (config_by_asset).
+        "cautelosa": {"duracao": 15, "duracao_unit": "m", "rsi_upper": 75, "rsi_lower": 25, "conf_min": 0.78, "stop_diario_pct": 0.30},
+        "moderada":  {"duracao": 15, "duracao_unit": "m", "rsi_upper": 70, "rsi_lower": 30, "conf_min": 0.70, "stop_diario_pct": 0.30},
+        "agressiva": {"duracao": 15, "duracao_unit": "m", "rsi_upper": 65, "rsi_lower": 35, "conf_min": 0.62, "stop_diario_pct": 0.30},
     },
 }
 
@@ -1116,6 +1192,28 @@ async def _deriv_bot_async(ss: SessionState, token: str, valor_brl: float,
                 ss.log(f"💱 R${_MART_BASE_BRL:.2f} base → {currency} {mart_stake_curr[0]:.2f} "
                        f"| Martingale x{_MART_MULT} até {_MART_MAX_ROUND} rounds", "info")
 
+                # ── DESCOBERTA DE DURAÇÃO REAL POR ATIVO (Fase 2) ─────────
+                # PRECISA rodar antes de qualquer subscribe (balance/ticks) —
+                # fetch_contract_specs usa recv() direto, que colidiria com o
+                # loop principal de mensagens se já houvesse subscription ativa.
+                config_by_asset = {a: dict(config) for a in ASSETS}
+                if MARKET_MODE == "forex":
+                    for _a in ASSETS:
+                        _spec = await fetch_contract_specs(dws, _a)
+                        if _spec:
+                            config_by_asset[_a]["duracao"]      = _spec["duracao"]
+                            config_by_asset[_a]["duracao_unit"] = _spec["duracao_unit"]
+                            ss.log(
+                                f"📐 {ASSET_NAMES.get(_a,_a)} | duração mínima real: "
+                                f"{_spec['duracao']}{_spec['duracao_unit']}", "info"
+                            )
+                        else:
+                            ss.log(
+                                f"⚠️ {ASSET_NAMES.get(_a,_a)} | não consegui descobrir via "
+                                f"contracts_for, usando padrão {config['duracao']}{config['duracao_unit']}",
+                                "warn"
+                            )
+
                 # ── SUBSCRIÇÕES ───────────────────────────────────────────
                 await dws.send(json.dumps({"balance": 1, "subscribe": 1}))
                 for asset in ASSETS:
@@ -1135,6 +1233,7 @@ async def _deriv_bot_async(ss: SessionState, token: str, valor_brl: float,
                         "mart_round": mart_round[0],
                         "amount": _amount,
                     }
+                    _cfg = config_by_asset.get(asset, config)
                     await dws.send(json.dumps({
                         "proposal":       1,
                         "req_id":         rid,
@@ -1142,8 +1241,8 @@ async def _deriv_bot_async(ss: SessionState, token: str, valor_brl: float,
                         "basis":          "stake",
                         "contract_type":  direction,
                         "currency":       currency,
-                        "duration":       config["duracao"],
-                        "duration_unit":  config.get("duracao_unit", "s"),
+                        "duration":       _cfg["duracao"],
+                        "duration_unit":  _cfg.get("duracao_unit", "s"),
                         "symbol":         asset,
                     }))
                     aname = ASSET_NAMES.get(asset, asset)
@@ -1444,7 +1543,7 @@ async def _deriv_bot_async(ss: SessionState, token: str, valor_brl: float,
                         # Só abre nova trade se não há contrato ativo nem proposta pendente
                         if active_cx or pending_p or pending_buy:
                             # Limpar sinais pendentes expirados enquanto há trade aberta
-                            _exp = 20 if config.get("duracao_unit") in ("t", "s") else 120
+                            _exp = 20 if config_by_asset.get(asset, config).get("duracao_unit") in ("t", "s") else 120
                             for _a in list(pending_signal):
                                 ps = pending_signal[_a]
                                 if ps and (now - ps["ts"]) > _exp:
@@ -1489,13 +1588,13 @@ async def _deriv_bot_async(ss: SessionState, token: str, valor_brl: float,
                             continue
 
                         # ── Cooldown adaptativo ──────────────────────────────
-                        _unit = config.get("duracao_unit", "t")
-                        if _unit == "t":
-                            base_cooldown = config["duracao"] + 5   # 5 ticks → ~10s base
-                        elif _unit == "s":
-                            base_cooldown = config["duracao"] + 5
+                        _cfg_asset = config_by_asset.get(asset, config)
+                        _unit = _cfg_asset.get("duracao_unit", "t")
+                        _dur_s = _duration_to_seconds(_cfg_asset["duracao"], _unit)
+                        if _unit in ("t", "s"):
+                            base_cooldown = _dur_s + 5   # +5s de margem em durações curtas
                         else:
-                            base_cooldown = config["duracao"] * 60
+                            base_cooldown = _dur_s        # já em segundos reais (m/h/d convertido)
                         last_res = perf[asset].get("last_result")
                         if last_res == 0:
                             cooldown = base_cooldown       # após LOSS: volta rápido
@@ -1693,13 +1792,8 @@ async def _deriv_bot_async(ss: SessionState, token: str, valor_brl: float,
                             direction_cx= binfo.get("direction", "CALL")
                             payout_cx   = binfo.get("expected_payout", bp * 1.85)
                             entry_price = tick_buf.get(asset_cx, [0])[-1] if tick_buf.get(asset_cx) else 0
-                            _unit = config.get("duracao_unit", "t")
-                            if _unit == "t":
-                                _dur_secs = config["duracao"] * 1.5   # 5 ticks × ~1s + margem
-                            elif _unit == "s":
-                                _dur_secs = config["duracao"]
-                            else:
-                                _dur_secs = config["duracao"] * 60
+                            _cfg_cx   = config_by_asset.get(asset_cx, config)
+                            _dur_secs = _duration_to_seconds(_cfg_cx["duracao"], _cfg_cx.get("duracao_unit", "t"))
                             expires_at  = time.time() + _dur_secs + 8  # +8s buffer para liquidação
                             tid = f"T{trade_count}"
                             active_cx[cid] = {
