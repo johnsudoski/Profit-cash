@@ -291,6 +291,97 @@ async def fetch_external_price(deriv_symbol: str):
         return None
 
 
+# ── BLACKOUT DE NOTÍCIAS (Fase 6 — Finnhub, opcional) ────────────────────────
+# Pausa pares afetados N minutos antes/depois de eventos econômicos de alto
+# impacto (NFP, FOMC, CPI, decisão de juros, etc.) — evita operar durante o
+# spread alargado/whipsaw típico desses eventos. Igual ao F10: nunca bloqueia
+# o robô se a API falhar ou a chave não estiver configurada, só desativa a
+# checagem (loga uma vez). Diferente da trading_times (Fase 3, vem da própria
+# Deriv): aqui é dependência de 3º (Finnhub), por isso fail-OPEN (sem dado =
+# sem blackout) em vez de fail-closed — não faz sentido travar o robô inteiro
+# por uma API externa que o usuário ainda nem configurou.
+#
+# NOTA DE HONESTIDADE: não tenho uma chave Finnhub real pra validar o shape
+# exato da resposta como fiz com a Deriv (curl real). Os nomes de campo abaixo
+# (country/impact/time/event) são os documentados publicamente pela Finnhub,
+# mas o parsing é defensivo (.get() em tudo) — se algum campo vier diferente,
+# o pior caso é "não achou evento" (fail-open), nunca um crash.
+FINNHUB_API_KEY              = os.environ.get("FINNHUB_API_KEY", "")
+NEWS_BLACKOUT_ENABLED        = os.environ.get("NEWS_BLACKOUT_ENABLED", "true").lower() == "true"
+NEWS_BLACKOUT_MINUTES_BEFORE = int(os.environ.get("NEWS_BLACKOUT_MINUTES_BEFORE", "15"))
+NEWS_BLACKOUT_MINUTES_AFTER  = int(os.environ.get("NEWS_BLACKOUT_MINUTES_AFTER", "15"))
+
+_COUNTRY_TO_CCY = {
+    "US": "USD", "GB": "GBP", "EU": "EUR", "JP": "JPY",
+    "AU": "AUD", "CA": "CAD", "CH": "CHF", "NZ": "NZD",
+}
+
+
+async def fetch_high_impact_events(date_str: str):
+    """
+    Busca eventos econômicos de ALTO impacto da Finnhub para `date_str`
+    (YYYY-MM-DD). Retorna lista de {"country": str, "time": str, "event": str}
+    — só os campos usados pelo blackout, já filtrados por impact=high.
+    Fail-open: lista vazia em qualquer erro/chave ausente (nunca trava o robô).
+    """
+    if not NEWS_BLACKOUT_ENABLED or not FINNHUB_API_KEY:
+        return []
+
+    def _do_request():
+        url = (f"https://finnhub.io/api/v1/calendar/economic"
+               f"?from={date_str}&to={date_str}&token={FINNHUB_API_KEY}")
+        with urllib.request.urlopen(url, timeout=10) as resp:
+            return json.loads(resp.read().decode("utf-8"))
+
+    try:
+        data = await asyncio.to_thread(_do_request)
+    except Exception:
+        return []
+    raw_events = data.get("economicCalendar", []) if isinstance(data, dict) else []
+    events = []
+    for e in raw_events:
+        if str(e.get("impact", "")).lower() != "high":
+            continue
+        events.append({
+            "country": e.get("country", ""),
+            "time":    e.get("time", ""),
+            "event":   e.get("event", "?"),
+        })
+    return events
+
+
+def is_news_blackout_now(events: list, deriv_symbol: str,
+                          minutes_before: int = 15, minutes_after: int = 15) -> str:
+    """
+    Retorna o nome do evento se `deriv_symbol` estiver em blackout AGORA
+    (dentro da janela antes/depois de algum evento de alto impacto que afete
+    uma das moedas do par), ou "" se não houver blackout.
+    Fail-safe: "" (sem blackout) se `events` vier vazio/malformado — essa
+    função é fail-OPEN de propósito (ver comentário acima sobre Finnhub
+    ser dependência de 3º, diferente de trading_times que é fail-closed).
+    """
+    if not events:
+        return ""
+    try:
+        now = datetime.now(timezone.utc)
+        sym_upper = deriv_symbol.upper()
+        for e in events:
+            ccy = _COUNTRY_TO_CCY.get(str(e.get("country", "")).upper())
+            if not ccy or ccy not in sym_upper:
+                continue
+            try:
+                evt_time = datetime.fromisoformat(e["time"]).replace(tzinfo=timezone.utc)
+            except (ValueError, KeyError):
+                continue
+            window_start = evt_time - timedelta(minutes=minutes_before)
+            window_end   = evt_time + timedelta(minutes=minutes_after)
+            if window_start <= now <= window_end:
+                return e.get("event", "evento de alto impacto")
+        return ""
+    except Exception:
+        return ""
+
+
 # ── Ticto / Assinatura ───────────────────────────────────────────────────────
 # TICTO_MODE=open  → todos têm acesso (desenvolvimento / testes)
 # TICTO_MODE=strict → só quem comprou na Ticto tem acesso
@@ -1230,6 +1321,8 @@ async def _deriv_bot_async(ss: SessionState, token: str, valor_brl: float,
     # Fase 5 (F10): histórico curto de cotações externas por ativo, pra
     # derivar uma direção (last vs first) sem precisar de 1 ponto só.
     f10_history = {a: [] for a in ASSETS}
+    # Fase 6: evita logar "blackout de notícia" a cada tick
+    news_blackout_logged = {a: False for a in ASSETS}
 
     def _best_asset():
         """
@@ -1398,6 +1491,21 @@ async def _deriv_bot_async(ss: SessionState, token: str, valor_brl: float,
                     if not trading_times_by_symbol:
                         ss.log("⚠️ Não consegui obter trading_times — checagem de "
                                "mercado aberto/fechado desativada nesta sessão.", "warn")
+
+                # ── BLACKOUT DE NOTÍCIAS (Fase 6) ──────────────────────────
+                # Não usa dws (é REST independente via Finnhub) — sem a mesma
+                # restrição de "antes de subscrever" das Fases 2/3, mas busca
+                # aqui também por organização (setup da sessão).
+                news_events = []
+                news_events_date = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+                if MARKET_MODE == "forex" and NEWS_BLACKOUT_ENABLED:
+                    if not FINNHUB_API_KEY:
+                        ss.log("ℹ️ NEWS_BLACKOUT_ENABLED=true mas FINNHUB_API_KEY não "
+                               "configurada — blackout de notícias inativo.", "info")
+                    else:
+                        news_events = await fetch_high_impact_events(news_events_date)
+                        ss.log(f"📰 Blackout de notícias: {len(news_events)} evento(s) "
+                               f"de alto impacto hoje.", "info")
 
                 # ── SUBSCRIÇÕES ───────────────────────────────────────────
                 await dws.send(json.dumps({"balance": 1, "subscribe": 1}))
@@ -1718,6 +1826,21 @@ async def _deriv_bot_async(ss: SessionState, token: str, valor_brl: float,
                                             f10_history[asset] = f10_history[asset][-5:]
                                     except Exception:
                                         pass  # F10 nunca pode afetar o loop principal
+
+                                # Fase 6: re-busca eventos do dia se a data UTC
+                                # rolou (sessão atravessou meia-noite). Só refaz
+                                # 1x por dia, não a cada 60s — fetch_high_impact_events
+                                # já é fail-open (lista vazia em qualquer erro).
+                                if NEWS_BLACKOUT_ENABLED and FINNHUB_API_KEY:
+                                    _today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+                                    if _today != news_events_date:
+                                        news_events_date = _today
+                                        try:
+                                            news_events = await fetch_high_impact_events(_today)
+                                            ss.log(f"📰 Novo dia UTC — {len(news_events)} "
+                                                   f"evento(s) de alto impacto hoje.", "info")
+                                        except Exception:
+                                            news_events = []
                             # ── Ranking dinâmico das últimas 2h ──────────────
                             _now_ts  = time.time()
                             _cutoff2 = _now_ts - _TWO_HOURS
@@ -1777,6 +1900,22 @@ async def _deriv_bot_async(ss: SessionState, token: str, valor_brl: float,
                             elif market_closed_logged[asset]:
                                 market_closed_logged[asset] = False
                                 ss.log(f"🔔 {ASSET_NAMES.get(asset,asset)} | mercado reabriu.", "info")
+
+                        # ── Blackout de notícias (Fase 6) ───────────────────
+                        if MARKET_MODE == "forex" and NEWS_BLACKOUT_ENABLED and news_events:
+                            _evt = is_news_blackout_now(
+                                news_events, asset,
+                                NEWS_BLACKOUT_MINUTES_BEFORE, NEWS_BLACKOUT_MINUTES_AFTER
+                            )
+                            if _evt:
+                                if not news_blackout_logged[asset]:
+                                    news_blackout_logged[asset] = True
+                                    ss.log(f"📰⏸️ {ASSET_NAMES.get(asset,asset)} | "
+                                           f"blackout: \"{_evt}\" (±{NEWS_BLACKOUT_MINUTES_BEFORE}min)", "warn")
+                                continue
+                            elif news_blackout_logged[asset]:
+                                news_blackout_logged[asset] = False
+                                ss.log(f"📰✅ {ASSET_NAMES.get(asset,asset)} | blackout encerrado.", "info")
 
                         # ── MARTINGALE RECOVERY: re-entrada imediata ────────
                         # Após LOSS, recovery_pending[asset] guarda a direção.
