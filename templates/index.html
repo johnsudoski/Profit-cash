@@ -535,6 +535,74 @@
     @keyframes bounce-in { 0%{transform:scale(.3);opacity:0} 50%{transform:scale(1.1)} 100%{transform:scale(1);opacity:1} }
     @keyframes confetti-fall { to{transform:translateY(110vh) rotate(720deg);opacity:0} }
     ::-webkit-scrollbar { width:0; }
+
+    /* ═══════════════════════════════════════
+       NEWS TERMINAL (painel de notícias — Fase 6)
+       Paleta própria (verde/ciano neon), deliberadamente distinta do
+       vermelho/rosa do resto do app — é uma "zona de terminal de dados".
+    ═══════════════════════════════════════ */
+    :root {
+      --term-bg:     #050a05;
+      --term-green:  #00ff8f;
+      --term-cyan:   #00e5ff;
+      --term-dim:    rgba(0,255,143,.45);
+      --term-border: rgba(0,229,255,.35);
+    }
+    .news-page, .news-sidebar {
+      font-family:'SF Mono','Cascadia Code','Courier New',monospace;
+    }
+    .news-page { padding:16px 16px 100px; }
+    .news-terminal-header {
+      display:flex; align-items:center; justify-content:space-between;
+      margin-bottom:14px; font-size:12px; color:var(--term-cyan); letter-spacing:.5px;
+    }
+    .news-rec-dot { display:inline-flex; align-items:center; gap:6px; color:var(--term-green); }
+    .news-rec-dot .dot {
+      width:7px; height:7px; border-radius:50%; background:var(--term-green);
+      box-shadow:0 0 8px var(--term-green); animation:news-pulse 1.4s infinite;
+    }
+    @keyframes news-pulse { 0%,100%{opacity:1} 50%{opacity:.25} }
+
+    .news-card {
+      background:var(--term-bg); border:1px solid var(--term-border);
+      border-radius:8px; padding:12px 14px; margin-bottom:10px;
+      box-shadow:0 0 18px rgba(0,229,255,.06) inset;
+    }
+    .news-card.blackout {
+      border-color:var(--accent); box-shadow:0 0 18px rgba(255,45,85,.18) inset;
+    }
+    .news-impact-badge {
+      display:inline-block; font-size:10px; font-weight:700; letter-spacing:.5px;
+      padding:2px 7px; border-radius:4px; background:rgba(255,69,58,.18); color:var(--red);
+      margin-bottom:6px;
+    }
+    .news-event-name {
+      font-size:14px; color:var(--term-green); margin-bottom:4px;
+      text-shadow:0 0 6px rgba(0,255,143,.35);
+    }
+    .news-meta-row {
+      font-size:11px; color:var(--term-dim); display:flex; gap:10px;
+      flex-wrap:wrap; margin-bottom:6px;
+    }
+    .news-countdown { font-size:13px; color:var(--term-cyan); }
+    .news-bar { letter-spacing:-1px; color:var(--term-cyan); opacity:.7; }
+    .news-blackout-tag {
+      margin-top:6px; font-size:11px; color:var(--accent);
+      display:flex; align-items:center; gap:5px;
+    }
+    .news-empty { text-align:center; color:var(--lbl3); font-size:13px; padding:40px 20px; }
+
+    /* Painel fixo — só aparece em telas largas (desktop) */
+    .news-sidebar { display:none; }
+    @media (min-width:900px) {
+      .news-sidebar {
+        display:block; position:fixed; right:24px; top:24px; bottom:24px;
+        width:380px; overflow-y:auto;
+        background:var(--term-bg); border:1px solid var(--term-border);
+        border-radius:var(--r-xl); padding:18px; box-shadow:0 0 40px rgba(0,229,255,.08);
+      }
+      #tab-news { display:none; } /* no desktop o painel já está sempre visível */
+    }
   </style>
 </head>
 <body>
@@ -814,6 +882,18 @@
       <button class="btn-logout" onclick="location.href='/logout'">Sair da conta</button>
     </div>
 
+    <!-- ══════ PAGE: NEWS (aba mobile) ══════ -->
+    <div class="page news-page" id="page-news">
+      <div class="page-title">📰 Notícias</div>
+      <div class="news-terminal-header">
+        <span class="news-rec-dot"><span class="dot"></span> LIVE FEED</span>
+        <span id="news-clock-mobile">--:--:--</span>
+      </div>
+      <div id="news-list-mobile">
+        <div class="news-empty">Carregando…</div>
+      </div>
+    </div>
+
   </div><!-- /content -->
 
   <!-- TABBAR -->
@@ -830,8 +910,22 @@
     <div class="tab-item" id="tab-settings" onclick="switchPage('settings')">
       <span class="tab-icon">⚙️</span><span class="tab-label">Config</span>
     </div>
+    <div class="tab-item" id="tab-news" onclick="switchPage('news')">
+      <span class="tab-icon">📰</span><span class="tab-label">Notícias</span>
+    </div>
   </nav>
 </div><!-- /app -->
+
+<!-- NEWS SIDEBAR (painel fixo — só visível em telas largas, ver @media) -->
+<aside class="news-sidebar" id="news-sidebar">
+  <div class="news-terminal-header">
+    <span class="news-rec-dot"><span class="dot"></span> LIVE FEED</span>
+    <span id="news-clock-desktop">--:--:--</span>
+  </div>
+  <div id="news-list-desktop">
+    <div class="news-empty">Carregando…</div>
+  </div>
+</aside>
 
 <!-- TOKEN MODAL -->
 <div class="modal-ov" id="modal-token">
@@ -875,6 +969,8 @@ const S = {
   running:false, connected:false,
   saldo:null, lucro:0, wins:0, losses:0,
   signal:null, trades:[], mSteps:[], totalOps:0,
+  marketMode:'{{ market_mode }}', newsEnabled:{{ 'true' if news_enabled else 'false' }},
+  news:[],
 };
 
 let ws=null, chart=null, series=null;
@@ -897,6 +993,7 @@ function handle(m){
   else if(m.type==='sinal') onSinal(m);
   else if(m.type==='trade') onTrade(m);
   else if(m.type==='resultado') onResultado(m);
+  else if(m.type==='news') onNews(m);
 }
 
 /* Mostra o log real do robô enquanto a tela "analisando" está parada
@@ -1278,6 +1375,87 @@ function playWin(){
 }
 
 /* ═══════════════════════════════════════════════════════
+   NEWS TERMINAL (painel de notícias — Fase 6)
+   Renderiza o MESMO html em 2 containers (aba mobile + painel fixo
+   desktop) — CSS decide qual fica visível via @media, não o JS.
+═══════════════════════════════════════════════════════ */
+function onNews(m){
+  S.news = m.events || [];
+  renderNews();
+}
+
+function fmtCountdown(secs){
+  secs = Math.abs(Math.round(secs));
+  const h=Math.floor(secs/3600), mi=Math.floor((secs%3600)/60), s=secs%60;
+  return [h,mi,s].map(v=>String(v).padStart(2,'0')).join(':');
+}
+
+function newsBar(secsToEvent, windowSecs){
+  const total=15;
+  if(secsToEvent==null || windowSecs<=0) return '░'.repeat(total);
+  const pct = Math.max(0, Math.min(1, 1-(secsToEvent/windowSecs)));
+  const filled = Math.round(pct*total);
+  return '▓'.repeat(filled) + '░'.repeat(total-filled);
+}
+
+function renderNewsCard(e){
+  const now = Date.now()/1000;
+  const secsToEvent = e.time_epoch!=null ? (e.time_epoch-now) : null;
+  const hasAffected = e.affected_assets && e.affected_assets.length;
+  const isBlackoutNow = secsToEvent!=null && Math.abs(secsToEvent) <= 15*60 && hasAffected;
+  const hasVals = e.actual!=null || e.estimate!=null || e.prev!=null;
+  const valLine = hasVals
+    ? `<div class="news-meta-row">ant: ${e.prev??'--'}${e.unit||''} &nbsp; est: ${e.estimate??'--'}${e.unit||''}${e.actual!=null?` &nbsp; real: ${e.actual}${e.unit||''}`:''}</div>`
+    : '';
+  const blackoutTag = hasAffected
+    ? `<div class="news-blackout-tag">${isBlackoutNow?'⏸ Pausando':'⏳ Vai pausar'}: ${e.affected_assets.join(', ')}</div>`
+    : '';
+  const countdownTxt = secsToEvent==null ? '--:--:--'
+    : secsToEvent>=0 ? 'T-'+fmtCountdown(secsToEvent) : 'há '+fmtCountdown(secsToEvent);
+  return `<div class="news-card${isBlackoutNow?' blackout':''}">
+      <span class="news-impact-badge">ALTO IMPACTO</span>
+      <div class="news-event-name">${e.country||'?'} · ${e.event||'Evento'}</div>
+      ${valLine}
+      <div class="news-countdown" data-countdown="${e.time_epoch??''}">${countdownTxt}</div>
+      <div class="news-bar">${newsBar(secsToEvent, 15*60)}</div>
+      ${blackoutTag}
+    </div>`;
+}
+
+function renderNews(){
+  let html;
+  if(S.marketMode !== 'forex'){
+    html = '<div class="news-empty">📡 Notícias não se aplicam a índices sintéticos<br>(operam 24/7, sem correlação com eventos reais)</div>';
+  } else if(!S.newsEnabled){
+    html = '<div class="news-empty">⚙️ Configure FINNHUB_API_KEY no Railway<br>para ativar o painel de notícias</div>';
+  } else if(!S.news || !S.news.length){
+    html = '<div class="news-empty">✅ Nenhum evento de alto impacto hoje</div>';
+  } else {
+    html = S.news.map(renderNewsCard).join('');
+  }
+  const elM = document.getElementById('news-list-mobile');
+  const elD = document.getElementById('news-list-desktop');
+  if(elM) elM.innerHTML = html;
+  if(elD) elD.innerHTML = html;
+}
+
+function tickNewsClock(){
+  const clockStr = new Date().toISOString().slice(11,19)+' UTC';
+  const cm = document.getElementById('news-clock-mobile');
+  const cd = document.getElementById('news-clock-desktop');
+  if(cm) cm.textContent = clockStr;
+  if(cd) cd.textContent = clockStr;
+  if(!S.news || !S.news.length) return;
+  const now = Date.now()/1000;
+  document.querySelectorAll('[data-countdown]').forEach(el=>{
+    const epoch = parseFloat(el.dataset.countdown);
+    if(!epoch) return;
+    const secs = epoch-now;
+    el.textContent = secs>=0 ? 'T-'+fmtCountdown(secs) : 'há '+fmtCountdown(secs);
+  });
+}
+
+/* ═══════════════════════════════════════════════════════
    UTILS
 ═══════════════════════════════════════════════════════ */
 function fmt(n){ return Number(n).toLocaleString('pt-BR',{minimumFractionDigits:2,maximumFractionDigits:2}); }
@@ -1290,6 +1468,9 @@ document.addEventListener('DOMContentLoaded',()=>{
   connectWS();
   renderMartingale();
   renderHistory();
+  renderNews();
+  setInterval(tickNewsClock, 1000);
+  setInterval(renderNews, 30000); // recalcula status de blackout (1s só atualiza o texto)
   document.getElementById('modal-token').addEventListener('click',function(e){ if(e.target===this) closeModal('modal-token'); });
 });
 </script>

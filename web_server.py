@@ -317,11 +317,42 @@ _COUNTRY_TO_CCY = {
 }
 
 
+def _parse_finnhub_time(time_str: str):
+    """Normaliza o horário da Finnhub para epoch segundos (UTC). Tenta com
+    espaço (formato documentado, "2026-07-03 12:30:00") e com 'T' (ISO
+    estrito), nessa ordem — fromisoformat do Python 3.11+ já aceita ambos,
+    mas a troca manual cobre versões mais antigas também. None se nada
+    funcionar (caller decide o fallback, nunca quebra por isso)."""
+    if not time_str:
+        return None
+    for candidate in (time_str, time_str.replace(" ", "T", 1)):
+        try:
+            dt = datetime.fromisoformat(candidate)
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            return dt.timestamp()
+        except ValueError:
+            continue
+    return None
+
+
+def _event_affected_assets(country: str) -> list:
+    """Lista de nomes amigáveis (ex: 'EUR/USD') dos ativos atuais (ASSETS)
+    cuja moeda é afetada pelo país do evento. [] se não afetar nenhum (ex:
+    país sem par operado, ou country não mapeado)."""
+    ccy = _COUNTRY_TO_CCY.get(str(country or "").upper())
+    if not ccy:
+        return []
+    return [ASSET_NAMES.get(a, a) for a in ASSETS if ccy in a.upper()]
+
+
 async def fetch_high_impact_events(date_str: str):
     """
     Busca eventos econômicos de ALTO impacto da Finnhub para `date_str`
-    (YYYY-MM-DD). Retorna lista de {"country": str, "time": str, "event": str}
-    — só os campos usados pelo blackout, já filtrados por impact=high.
+    (YYYY-MM-DD). Retorna lista de dicts com todas as variáveis úteis pro
+    painel (impact/actual/estimate/prev/unit) + 2 campos derivados:
+    time_epoch (horário normalizado, usado pro contador regressivo no
+    front) e affected_assets (quais pares operados esse evento afeta).
     Fail-open: lista vazia em qualquer erro/chave ausente (nunca trava o robô).
     """
     if not NEWS_BLACKOUT_ENABLED or not FINNHUB_API_KEY:
@@ -342,10 +373,18 @@ async def fetch_high_impact_events(date_str: str):
     for e in raw_events:
         if str(e.get("impact", "")).lower() != "high":
             continue
+        country = e.get("country", "")
         events.append({
-            "country": e.get("country", ""),
-            "time":    e.get("time", ""),
-            "event":   e.get("event", "?"),
+            "country":         country,
+            "time":            e.get("time", ""),
+            "time_epoch":      _parse_finnhub_time(e.get("time", "")),
+            "event":           e.get("event", "?"),
+            "impact":          e.get("impact", ""),
+            "actual":          e.get("actual"),
+            "estimate":        e.get("estimate"),
+            "prev":            e.get("prev"),
+            "unit":            e.get("unit", ""),
+            "affected_assets": _event_affected_assets(country),
         })
     return events
 
@@ -363,19 +402,20 @@ def is_news_blackout_now(events: list, deriv_symbol: str,
     if not events:
         return ""
     try:
-        now = datetime.now(timezone.utc)
+        now_epoch = datetime.now(timezone.utc).timestamp()
         sym_upper = deriv_symbol.upper()
         for e in events:
             ccy = _COUNTRY_TO_CCY.get(str(e.get("country", "")).upper())
             if not ccy or ccy not in sym_upper:
                 continue
-            try:
-                evt_time = datetime.fromisoformat(e["time"]).replace(tzinfo=timezone.utc)
-            except (ValueError, KeyError):
+            # time_epoch já vem calculado de fetch_high_impact_events
+            # (_parse_finnhub_time) — evita reparsear a mesma string aqui.
+            evt_epoch = e.get("time_epoch")
+            if evt_epoch is None:
                 continue
-            window_start = evt_time - timedelta(minutes=minutes_before)
-            window_end   = evt_time + timedelta(minutes=minutes_after)
-            if window_start <= now <= window_end:
+            window_start = evt_epoch - minutes_before * 60
+            window_end   = evt_epoch + minutes_after * 60
+            if window_start <= now_epoch <= window_end:
                 return e.get("event", "evento de alto impacto")
         return ""
     except Exception:
@@ -632,6 +672,7 @@ class SessionState:
             "wins": 0,    "losses": 0,
             "rodando": False, "conectado": False,
         }
+        self.news_snap = []  # último snapshot de eventos econômicos (Fase 6 + painel)
 
     def broadcast(self, msg: dict):
         data = json.dumps(msg, ensure_ascii=False, default=str)
@@ -659,6 +700,12 @@ class SessionState:
     def trade(self, tid, ativo, direcao, valor):
         self.broadcast({"type": "trade", "id": str(tid),
                         "ativo": ativo, "direcao": direcao, "valor": valor})
+
+    def news(self, events: list):
+        """Atualiza o snapshot de eventos econômicos e avisa todo cliente
+        conectado — mesmo padrão de update_estado (snapshot + broadcast)."""
+        self.news_snap = events
+        self.broadcast({"type": "news", "events": events})
 
     def resultado(self, tid, resultado, lucro, lucro_brl=0):
         self.broadcast({"type": "resultado", "id": str(tid),
@@ -1506,6 +1553,7 @@ async def _deriv_bot_async(ss: SessionState, token: str, valor_brl: float,
                         news_events = await fetch_high_impact_events(news_events_date)
                         ss.log(f"📰 Blackout de notícias: {len(news_events)} evento(s) "
                                f"de alto impacto hoje.", "info")
+                ss.news(news_events)  # popula o painel mesmo se vier vazio (estado "sem eventos")
 
                 # ── SUBSCRIÇÕES ───────────────────────────────────────────
                 await dws.send(json.dumps({"balance": 1, "subscribe": 1}))
@@ -1841,6 +1889,7 @@ async def _deriv_bot_async(ss: SessionState, token: str, valor_brl: float,
                                                    f"evento(s) de alto impacto hoje.", "info")
                                         except Exception:
                                             news_events = []
+                                        ss.news(news_events)
                             # ── Ranking dinâmico das últimas 2h ──────────────
                             _now_ts  = time.time()
                             _cutoff2 = _now_ts - _TWO_HOURS
@@ -2666,7 +2715,9 @@ def index():
                            sub_reason=reason,
                            sub_expires=expires_at,
                            course_url=TICTO_COURSE_URL or "#",
-                           ticto_mode=TICTO_MODE)
+                           ticto_mode=TICTO_MODE,
+                           market_mode=MARKET_MODE,
+                           news_enabled=(NEWS_BLACKOUT_ENABLED and bool(FINNHUB_API_KEY)))
 
 
 @app.route("/manifest.json")
@@ -2741,6 +2792,7 @@ def api_stop():
 def ws_handler(ws, sid):
     ss = get_or_create_session(sid)
     ws.send(json.dumps({"type": "estado", "data": dict(ss.estado_snap)}))
+    ws.send(json.dumps({"type": "news", "events": ss.news_snap}))
     with ss.ws_lock:
         ss.ws_clients.append(ws)
     try:
