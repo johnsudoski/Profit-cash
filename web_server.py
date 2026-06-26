@@ -170,6 +170,71 @@ async def fetch_contract_specs(dws, symbol: str):
     _contract_specs_cache[symbol] = (now, spec)
     return spec
 
+
+# ── SESSÃO DE MERCADO (forex) — trading_times ────────────────────────────────
+# Sintéticos operam 24/7, isso nunca foi necessário. Forex real fecha fim de
+# semana e tem horário diário (confirmado via trading_times: ex. AUD/USD abre
+# 00:00:00 e fecha 20:55:00 GMT, Mon-Fri). Sem essa checagem, o filtro de
+# "tick speed" (que existia antes) só detecta mercado PARADO, não DISTINGUE
+# de "fechado por horário" — loga warning genérico sem dizer o motivo real.
+_DAY_ABBR = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
+
+
+async def fetch_trading_times(dws) -> dict:
+    """
+    Busca trading_times para 'today' uma única vez por sessão e retorna
+    {underlying_symbol: entry} para consulta local depois (sem mais
+    chamadas WS — is_market_open_now() é cálculo puro).
+
+    MESMA RESTRIÇÃO de fetch_contract_specs: só pode ser chamada ANTES de
+    qualquer subscribe ativo (usa recv() direto). Por isso é buscada uma
+    vez só, no início da sessão, e não re-buscada no meio do dia — pior
+    caso: o dia da semana usado fica desatualizado por algumas horas se a
+    sessão atravessar a meia-noite UTC, o que só afeta a checagem de
+    trading_days, não o horário (recalculado a cada chamada via UTC atual).
+    """
+    try:
+        await dws.send(json.dumps({"trading_times": "today"}))
+        raw = await asyncio.wait_for(dws.recv(), timeout=15)
+        msg = json.loads(raw)
+    except Exception:
+        return {}
+    if "error" in msg:
+        return {}
+    by_symbol = {}
+    for mkt in msg.get("trading_times", {}).get("markets", []):
+        for sub in mkt.get("submarkets", []):
+            for sym in sub.get("symbols", []):
+                u = sym.get("underlying_symbol")
+                if u:
+                    by_symbol[u] = sym
+    return by_symbol
+
+
+def is_market_open_now(sym_info: dict) -> bool:
+    """
+    True se o mercado de `sym_info` (uma entrada de trading_times) está
+    aberto agora, comparando trading_days + times.open/close (GMT) contra
+    o horário UTC atual.
+
+    Fail-safe: retorna False (assume fechado) se faltar dado ou a estrutura
+    vier inesperada — nunca deixar AUSÊNCIA de informação significar
+    "está aberto" (perigoso para um bot que move dinheiro real).
+    """
+    if not sym_info:
+        return False
+    try:
+        now = datetime.utcnow()
+        if _DAY_ABBR[now.weekday()] not in sym_info.get("trading_days", []):
+            return False
+        now_t  = now.strftime("%H:%M:%S")
+        opens  = sym_info.get("times", {}).get("open", [])
+        closes = sym_info.get("times", {}).get("close", [])
+        return any(o <= now_t <= c for o, c in zip(opens, closes))
+    except Exception:
+        return False
+
+
 # ── Ticto / Assinatura ───────────────────────────────────────────────────────
 # TICTO_MODE=open  → todos têm acesso (desenvolvimento / testes)
 # TICTO_MODE=strict → só quem comprou na Ticto tem acesso
@@ -1070,6 +1135,8 @@ async def _deriv_bot_async(ss: SessionState, token: str, valor_brl: float,
     # Recuperação imediata: após LOSS guarda {direction, asset} para re-entrar
     # na próxima vela sem esperar novo sinal (bypass de todos os filtros)
     recovery_pending = {a: None for a in ASSETS}  # None ou 'CALL'/'PUT'
+    # Sessão de mercado (forex) — evita logar "mercado fechado" a cada tick
+    market_closed_logged = {a: False for a in ASSETS}
 
     def _best_asset():
         """
@@ -1213,6 +1280,15 @@ async def _deriv_bot_async(ss: SessionState, token: str, valor_brl: float,
                                 f"contracts_for, usando padrão {config['duracao']}{config['duracao_unit']}",
                                 "warn"
                             )
+
+                # ── SESSÃO DE MERCADO (Fase 3) ─────────────────────────────
+                # Mesma janela segura da Fase 2 — buscar ANTES de subscrever.
+                trading_times_by_symbol = {}
+                if MARKET_MODE == "forex":
+                    trading_times_by_symbol = await fetch_trading_times(dws)
+                    if not trading_times_by_symbol:
+                        ss.log("⚠️ Não consegui obter trading_times — checagem de "
+                               "mercado aberto/fechado desativada nesta sessão.", "warn")
 
                 # ── SUBSCRIÇÕES ───────────────────────────────────────────
                 await dws.send(json.dumps({"balance": 1, "subscribe": 1}))
@@ -1549,6 +1625,21 @@ async def _deriv_bot_async(ss: SessionState, token: str, valor_brl: float,
                                 if ps and (now - ps["ts"]) > _exp:
                                     pending_signal[_a] = None
                             continue
+
+                        # ── Sessão de mercado (forex) ───────────────────────
+                        # Diferente do filtro de "tick speed" (mercado momentaneamente
+                        # parado) — isso detecta fim de semana / fora do horário e
+                        # avisa o motivo real, sem ficar tentando silenciosamente.
+                        if MARKET_MODE == "forex":
+                            if not is_market_open_now(trading_times_by_symbol.get(asset)):
+                                if not market_closed_logged[asset]:
+                                    market_closed_logged[asset] = True
+                                    ss.log(f"💤 {ASSET_NAMES.get(asset,asset)} | "
+                                           f"mercado fechado agora (fora do horário/fim de semana).", "warn")
+                                continue
+                            elif market_closed_logged[asset]:
+                                market_closed_logged[asset] = False
+                                ss.log(f"🔔 {ASSET_NAMES.get(asset,asset)} | mercado reabriu.", "info")
 
                         # ── MARTINGALE RECOVERY: re-entrada imediata ────────
                         # Após LOSS, recovery_pending[asset] guarda a direção.
