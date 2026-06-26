@@ -1319,7 +1319,11 @@ async def _deriv_bot_async(ss: SessionState, token: str, valor_brl: float,
                         "currency":       currency,
                         "duration":       _cfg["duracao"],
                         "duration_unit":  _cfg.get("duracao_unit", "s"),
-                        "symbol":         asset,
+                        # "symbol" foi renomeado para "underlying_symbol" no novo schema
+                        # de proposal da Deriv (confirmado empiricamente 2026-06-25: o
+                        # antigo "symbol" retorna "Properties not allowed: symbol" —
+                        # isso travaria TODA tentativa de compra, em qualquer modo).
+                        "underlying_symbol": asset,
                     }))
                     aname = ASSET_NAMES.get(asset, asset)
                     _brl_now = _MART_BASE_BRL * (_MART_MULT ** mart_round[0])
