@@ -3,7 +3,7 @@ Profit Cash — Servidor Web (Deriv API + Multi-User Auth)
 """
 import asyncio, json, os, sqlite3, sys, threading, time, uuid, math, hashlib, hmac
 import urllib.request, urllib.error
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from functools import wraps
 from flask import (Flask, render_template, jsonify, request,
                    session, redirect, url_for)
@@ -224,7 +224,7 @@ def is_market_open_now(sym_info: dict) -> bool:
     if not sym_info:
         return False
     try:
-        now = datetime.utcnow()
+        now = datetime.now(timezone.utc)
         if _DAY_ABBR[now.weekday()] not in sym_info.get("trading_days", []):
             return False
         now_t  = now.strftime("%H:%M:%S")
