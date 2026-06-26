@@ -295,9 +295,17 @@ STRATEGIES_BY_MODE = {
         # USDJPY/AUDUSD só oferecem CALL/PUT a partir de 15min (expiry_type "intraday"),
         # bem diferente do segundo/tick que synthetic permite. fetch_contract_specs()
         # descobre o valor real por símbolo e sobrescreve isso em runtime (config_by_asset).
-        "cautelosa": {"duracao": 15, "duracao_unit": "m", "rsi_upper": 75, "rsi_lower": 25, "conf_min": 0.78, "stop_diario_pct": 0.30},
-        "moderada":  {"duracao": 15, "duracao_unit": "m", "rsi_upper": 70, "rsi_lower": 30, "conf_min": 0.70, "stop_diario_pct": 0.30},
-        "agressiva": {"duracao": 15, "duracao_unit": "m", "rsi_upper": 65, "rsi_lower": 35, "conf_min": 0.62, "stop_diario_pct": 0.30},
+        #
+        # candle_seconds: tamanho do candle agregado (build_candles) — controla o
+        # aquecimento (65 candles mínimo) e a "resolução" do sinal.
+        # squeeze_threshold: bandwidth máximo aceito como squeeze (detect_bb_squeeze_signal).
+        # cautelosa = candle maior + squeeze mais apertado → demorado e mais acertivo
+        #             (comportamento original, intocado).
+        # agressiva = candle menor + squeeze mais solto → mais rápido pra achar sinal,
+        #             porém menos seletivo (mais ruído, mais sinais falsos esperados).
+        "cautelosa": {"duracao": 15, "duracao_unit": "m", "rsi_upper": 75, "rsi_lower": 25, "conf_min": 0.78, "stop_diario_pct": 0.30, "candle_seconds": 10, "squeeze_threshold": 0.65},
+        "moderada":  {"duracao": 15, "duracao_unit": "m", "rsi_upper": 70, "rsi_lower": 30, "conf_min": 0.70, "stop_diario_pct": 0.30, "candle_seconds": 7,  "squeeze_threshold": 0.72},
+        "agressiva": {"duracao": 15, "duracao_unit": "m", "rsi_upper": 65, "rsi_lower": 35, "conf_min": 0.62, "stop_diario_pct": 0.30, "candle_seconds": 4,  "squeeze_threshold": 0.80},
     },
 }
 
@@ -563,13 +571,17 @@ def calc_bb(prices: list, period: int = 20, num_std: float = 2.0):
     return mid, mid + num_std * std, mid - num_std * std
 
 
-def detect_bb_squeeze_signal(prices: list, period: int = 20, dev: float = 2.0):
+def detect_bb_squeeze_signal(prices: list, period: int = 20, dev: float = 2.0,
+                              squeeze_threshold: float = 0.65):
     """
     Sinal de Bollinger Bands Squeeze + Breakout (lógica do Trade AI).
 
     Como funciona:
     1. SQUEEZE: compara bandwidth atual (BB de 20 ticks) com bandwidth
-       de uma janela 3x maior. Se a banda atual é ≤ 65% da normal → squeeze.
+       de uma janela 3x maior. Se a banda atual é ≤ squeeze_threshold da
+       normal → squeeze (default 65%; estratégias "soltam" esse valor —
+       ex: agressiva usa 80% — para achar sinal mais rápido, à custa de
+       menos seletividade).
     2. BREAKOUT: preço toca ou cruza uma das bandas após o squeeze.
        - Preço >= upper  → CALL (breakout para cima)
        - Preço <= lower  → PUT  (breakout para baixo)
@@ -598,9 +610,9 @@ def detect_bb_squeeze_signal(prices: list, period: int = 20, dev: float = 2.0):
     # Squeeze: banda atual comprimida em relação à normal
     if bw_hist == 0:
         return None, 0.0
-    squeeze_ratio = bw_now / bw_hist   # < 0.65 = squeeze
+    squeeze_ratio = bw_now / bw_hist   # < squeeze_threshold = squeeze
 
-    if squeeze_ratio > 0.65:
+    if squeeze_ratio > squeeze_threshold:
         return None, squeeze_ratio     # sem squeeze, não operar
 
     # Breakout: preço tocou ou cruzou a banda
@@ -1567,8 +1579,13 @@ async def _deriv_bot_async(ss: SessionState, token: str, valor_brl: float,
                             # logava só "Robô desconectado." (a mensagem real do
                             # erro era sobrescrita 1 log depois, invisível no app).
                             try:
+                                # candle_seconds por estratégia (cautelosa=10s
+                                # "demorado e acertivo" / agressiva=4s "rápido e
+                                # menos preciso") — fallback no global CANDLE_SECONDS
+                                # se a estratégia não definir (ex: chave ausente).
                                 candle_buf[asset] = build_candles(
-                                    tick_history[asset], CANDLE_SECONDS
+                                    tick_history[asset],
+                                    config.get("candle_seconds", CANDLE_SECONDS),
                                 )
                             except Exception as _e_candle:
                                 import traceback
@@ -1797,7 +1814,11 @@ async def _deriv_bot_async(ss: SessionState, token: str, valor_brl: float,
                         if len(buf) < 65:   # mínimo para calcular BB histórico
                             continue
 
-                        bb_signal, squeeze_ratio = detect_bb_squeeze_signal(buf)
+                        # squeeze_threshold por estratégia (cautelosa=0.65 mais
+                        # seletivo / agressiva=0.80 mais solto, acha sinal mais rápido
+                        # à custa de precisão). Sintético usa o default da função (0.65).
+                        _sqz_th = config.get("squeeze_threshold", 0.65)
+                        bb_signal, squeeze_ratio = detect_bb_squeeze_signal(buf, squeeze_threshold=_sqz_th)
 
                         if bb_signal is None:
                             continue   # sem squeeze ou sem breakout
