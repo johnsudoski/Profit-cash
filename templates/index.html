@@ -435,6 +435,46 @@
     .empty-state { text-align:center; padding:48px 0; color:var(--lbl3); font-size:14px; }
 
     /* ═══════════════════════════════════════
+       PERFORMANCE PRO (painel de métricas — Histórico)
+    ═══════════════════════════════════════ */
+    .perf-equity-card {
+      background:var(--bg3); border-radius:var(--r-lg); padding:14px 14px 6px;
+      margin-bottom:14px;
+    }
+    .perf-equity-label { font-size:12px; color:var(--lbl2); margin-bottom:6px; }
+    #equity-canvas { width:100%; height:70px; display:block; }
+    .perf-grid {
+      display:grid; grid-template-columns:1fr 1fr; gap:10px; margin-bottom:14px;
+    }
+    .perf-stat {
+      background:var(--bg3); border-radius:var(--r); padding:12px 14px;
+    }
+    .perf-stat-val { font-size:20px; font-weight:700; margin-bottom:2px; }
+    .perf-stat-val.pos { color:var(--green); }
+    .perf-stat-val.neg { color:var(--red); }
+    .perf-stat-lbl { font-size:11px; color:var(--lbl2); }
+    .perf-risk-bar-wrap { margin-bottom:16px; }
+    .perf-risk-label {
+      display:flex; justify-content:space-between; font-size:12px;
+      color:var(--lbl2); margin-bottom:6px;
+    }
+    .perf-risk-bar {
+      height:8px; border-radius:4px; background:var(--bg4); overflow:hidden;
+    }
+    .perf-risk-fill {
+      height:100%; border-radius:4px; background:var(--green);
+      transition:width .4s, background .4s;
+    }
+    .perf-risk-fill.warn { background:var(--gold); }
+    .perf-risk-fill.danger { background:var(--red); }
+    .btn-export-csv {
+      width:100%; padding:13px; margin-bottom:20px; border:1.5px solid var(--sep);
+      border-radius:var(--r-lg); background:transparent; color:var(--lbl2);
+      font-size:14px; font-weight:600; font-family:inherit; cursor:pointer;
+    }
+    .btn-export-csv:active { opacity:.7; }
+
+    /* ═══════════════════════════════════════
        SETTINGS PAGE
     ═══════════════════════════════════════ */
     .settings-page { padding:20px 16px; }
@@ -829,6 +869,41 @@
     <!-- ══════ PAGE: HISTORY ══════ -->
     <div class="page history-page" id="page-history">
       <div class="page-title">📋 Histórico</div>
+
+      <!-- PERFORMANCE PRO -->
+      <p class="section-title">Performance</p>
+      <div class="perf-equity-card">
+        <div class="perf-equity-label">Curva de capital</div>
+        <canvas id="equity-canvas" width="380" height="70"></canvas>
+      </div>
+      <div class="perf-grid">
+        <div class="perf-stat">
+          <div class="perf-stat-val" id="perf-profit-factor">--</div>
+          <div class="perf-stat-lbl">Profit Factor</div>
+        </div>
+        <div class="perf-stat">
+          <div class="perf-stat-val" id="perf-drawdown">--%</div>
+          <div class="perf-stat-lbl">Drawdown Máx</div>
+        </div>
+        <div class="perf-stat">
+          <div class="perf-stat-val" id="perf-streak">--</div>
+          <div class="perf-stat-lbl">Sequência Atual</div>
+        </div>
+        <div class="perf-stat">
+          <div class="perf-stat-val" id="perf-best-streak">--</div>
+          <div class="perf-stat-lbl">Melhor Sequência</div>
+        </div>
+      </div>
+      <div class="perf-risk-bar-wrap">
+        <div class="perf-risk-label">
+          <span>Exposição do dia</span>
+          <span id="perf-risk-pct">0% / --%</span>
+        </div>
+        <div class="perf-risk-bar"><div class="perf-risk-fill" id="perf-risk-fill" style="width:0%"></div></div>
+      </div>
+      <button class="btn-export-csv" onclick="exportTradesCsv()">⬇️ Exportar histórico (CSV)</button>
+
+      <p class="section-title">Operações</p>
       <div id="history-list"><div class="empty-state">Nenhuma operação ainda</div></div>
     </div>
 
@@ -971,6 +1046,9 @@ const S = {
   signal:null, trades:[], mSteps:[], totalOps:0,
   marketMode:'{{ market_mode }}', newsEnabled:{{ 'true' if news_enabled else 'false' }},
   news:[],
+  equityCurve:[], profitFactor:null, maxDrawdownPct:0,
+  curStreak:0, bestWinStreak:0, worstLossStreak:0,
+  saldoInicial:null, stopDiarioPct:null,
 };
 
 let ws=null, chart=null, series=null;
@@ -1017,6 +1095,17 @@ function onEstado(d){
   const bal=document.getElementById('nav-balance');
   if(d.saldo!=null) bal.textContent=fmt(d.saldo);
   updateChartStats();
+  // Performance pro — campos chegam só nos updates de resultado de trade
+  // (e saldo_inicial/stop_diario_pct 1x na conexão), por isso tudo opcional.
+  if(d.profit_factor!==undefined) S.profitFactor=d.profit_factor;
+  if(d.max_drawdown_pct!==undefined) S.maxDrawdownPct=d.max_drawdown_pct;
+  if(d.cur_streak!==undefined) S.curStreak=d.cur_streak;
+  if(d.best_win_streak!==undefined) S.bestWinStreak=d.best_win_streak;
+  if(d.worst_loss_streak!==undefined) S.worstLossStreak=d.worst_loss_streak;
+  if(d.equity_curve!==undefined) S.equityCurve=d.equity_curve;
+  if(d.saldo_inicial!==undefined) S.saldoInicial=d.saldo_inicial;
+  if(d.stop_diario_pct!==undefined) S.stopDiarioPct=d.stop_diario_pct;
+  renderPerformance();
 }
 
 function setDot(conn, run){
@@ -1217,6 +1306,83 @@ function renderHistory(){
         <div class="ti-dir">${t.win?'VITÓRIA':'DERROTA'}</div>
       </div>
     </div>`).join('');
+}
+
+/* ═══════════════════════════════════════════════════════
+   PERFORMANCE PRO (profit factor, drawdown, streaks, equity curve)
+═══════════════════════════════════════════════════════ */
+function renderPerformance(){
+  const pf = document.getElementById('perf-profit-factor');
+  if(pf){
+    pf.textContent = S.profitFactor==null ? '—' : S.profitFactor.toFixed(2);
+    pf.className = 'perf-stat-val' + (S.profitFactor==null ? '' : S.profitFactor>=1 ? ' pos' : ' neg');
+  }
+  const dd = document.getElementById('perf-drawdown');
+  if(dd){ dd.textContent = S.maxDrawdownPct.toFixed(1)+'%'; dd.className='perf-stat-val'+(S.maxDrawdownPct>15?' neg':''); }
+
+  const st = document.getElementById('perf-streak');
+  if(st){
+    st.textContent = S.curStreak===0 ? '—' : (S.curStreak>0?'+':'')+S.curStreak;
+    st.className = 'perf-stat-val'+(S.curStreak>0?' pos':S.curStreak<0?' neg':'');
+  }
+  const bst = document.getElementById('perf-best-streak');
+  if(bst){
+    bst.textContent = S.bestWinStreak>0 ? '+'+S.bestWinStreak : '—';
+    bst.className = 'perf-stat-val'+(S.bestWinStreak>0?' pos':'');
+  }
+
+  const riskPct = document.getElementById('perf-risk-pct');
+  const riskFill = document.getElementById('perf-risk-fill');
+  if(riskPct && riskFill && S.saldoInicial && S.stopDiarioPct!=null){
+    const perdaPct = Math.max(0, (S.saldoInicial - (S.saldo??S.saldoInicial)) / S.saldoInicial);
+    const limitePct = S.stopDiarioPct;
+    const pctOfLimit = limitePct>0 ? Math.min(100, (perdaPct/limitePct)*100) : 0;
+    riskPct.textContent = `${(perdaPct*100).toFixed(1)}% / ${(limitePct*100).toFixed(0)}%`;
+    riskFill.style.width = pctOfLimit+'%';
+    riskFill.className = 'perf-risk-fill' + (pctOfLimit>=90?' danger':pctOfLimit>=60?' warn':'');
+  }
+
+  drawEquityCurve();
+}
+
+function drawEquityCurve(){
+  const canvas = document.getElementById('equity-canvas');
+  if(!canvas) return;
+  const ctx = canvas.getContext('2d');
+  const w = canvas.clientWidth || 380, h = 70;
+  canvas.width = w; canvas.height = h;
+  ctx.clearRect(0,0,w,h);
+  const pts = S.equityCurve;
+  if(!pts || pts.length<2){
+    ctx.fillStyle = 'rgba(235,235,245,.3)'; ctx.font='12px -apple-system,sans-serif';
+    ctx.fillText('Aguardando operações…', 8, h/2+4);
+    return;
+  }
+  const vals = pts.map(p=>p.saldo);
+  const min = Math.min(...vals), max = Math.max(...vals);
+  const range = (max-min) || 1;
+  const pad = 6;
+  const stepX = (w-pad*2)/(pts.length-1);
+  const isUp = vals[vals.length-1] >= vals[0];
+  ctx.beginPath();
+  pts.forEach((p,i)=>{
+    const x = pad + i*stepX;
+    const y = h-pad - ((p.saldo-min)/range)*(h-pad*2);
+    i===0 ? ctx.moveTo(x,y) : ctx.lineTo(x,y);
+  });
+  ctx.strokeStyle = isUp ? '#30D158' : '#FF453A';
+  ctx.lineWidth = 2;
+  ctx.stroke();
+  // preenchimento suave embaixo da linha
+  ctx.lineTo(pad+(pts.length-1)*stepX, h-pad);
+  ctx.lineTo(pad, h-pad);
+  ctx.closePath();
+  ctx.fillStyle = isUp ? 'rgba(48,209,88,.12)' : 'rgba(255,69,58,.12)';
+  ctx.fill();
+}
+
+function exportTradesCsv(){
+  window.location.href = '/api/export/trades.csv';
 }
 
 /* ═══════════════════════════════════════════════════════
@@ -1469,6 +1635,7 @@ document.addEventListener('DOMContentLoaded',()=>{
   renderMartingale();
   renderHistory();
   renderNews();
+  renderPerformance();
   setInterval(tickNewsClock, 1000);
   setInterval(renderNews, 30000); // recalcula status de blackout (1s só atualiza o texto)
   document.getElementById('modal-token').addEventListener('click',function(e){ if(e.target===this) closeModal('modal-token'); });

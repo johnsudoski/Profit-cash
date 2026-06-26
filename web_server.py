@@ -2,11 +2,11 @@
 Profit Cash — Servidor Web (Deriv API + Multi-User Auth)
 """
 import asyncio, json, os, sqlite3, sys, threading, time, uuid, math, hashlib, hmac
-import urllib.request, urllib.error
+import urllib.request, urllib.error, csv, io
 from datetime import datetime, timedelta, timezone
 from functools import wraps
 from flask import (Flask, render_template, jsonify, request,
-                   session, redirect, url_for)
+                   session, redirect, url_for, Response)
 from flask_sock import Sock
 from werkzeug.security import generate_password_hash, check_password_hash
 
@@ -131,6 +131,27 @@ def _duration_to_seconds(duracao: int, unit: str, tick_seconds: float = 1.5) -> 
         "h": duracao * 3600,
         "d": duracao * 86400,
     }.get(unit, duracao)
+
+
+def _calc_max_drawdown_pct(equity_curve: list) -> float:
+    """
+    Maior queda percentual pico→vale na equity_curve (lista de
+    {"ts","saldo"}). Métrica padrão de mesa profissional/prop firm (FTMO
+    etc.) — mede o pior cenário histórico, não só o resultado líquido.
+    0.0 se não houver dados suficientes (não inventa risco que não existe).
+    """
+    if len(equity_curve) < 2:
+        return 0.0
+    peak = equity_curve[0]["saldo"]
+    max_dd = 0.0
+    for p in equity_curve:
+        saldo = p["saldo"]
+        if saldo > peak:
+            peak = saldo
+        elif peak > 0:
+            dd = (peak - saldo) / peak
+            max_dd = max(max_dd, dd)
+    return round(max_dd * 100, 2)
 
 
 async def fetch_contract_specs(dws, symbol: str):
@@ -673,6 +694,12 @@ class SessionState:
             "rodando": False, "conectado": False,
         }
         self.news_snap = []  # último snapshot de eventos econômicos (Fase 6 + painel)
+        # Trades desta sessão (in-memory, não persiste entre restarts — igual ao
+        # resto do estado da sessão). Usado pelo export CSV: NUNCA ler o
+        # logs/trades.jsonl compartilhado diretamente numa rota por-usuário —
+        # aquele arquivo é de TODAS as sessões/usuários juntos (sem campo de
+        # user_id), expor ele diretamente vazaria operações de outras pessoas.
+        self.trade_log = []
 
     def broadcast(self, msg: dict):
         data = json.dumps(msg, ensure_ascii=False, default=str)
@@ -1287,6 +1314,16 @@ async def _deriv_bot_async(ss: SessionState, token: str, valor_brl: float,
     config      = STRATEGIES.get(estrategia, STRATEGIES["moderada"])
     lucro_total = 0.0
     wins = losses = 0
+    # ── Métricas "pro" (painel de performance) ────────────────────────────
+    # gross_profit/gross_loss: somas brutas (sempre positivas) — profit_factor
+    # = gross_profit/gross_loss, métrica padrão de mesa profissional (>1.5 bom,
+    # <1.2 mal margem pra slippage). lucro_total (líquido) não serve pra isso.
+    gross_profit_brl   = 0.0
+    gross_loss_brl     = 0.0
+    cur_streak         = 0   # >0 = N vitórias seguidas, <0 = N derrotas seguidas
+    best_win_streak    = 0
+    worst_loss_streak  = 0   # mais negativo = pior sequência de derrotas
+    equity_curve       = []  # [{"ts": float, "saldo": float}, ...] — últimos 100 pontos
     tick_buf    = {a: [] for a in ASSETS}
     last_trade  = {a: 0.0 for a in ASSETS}
     active_cx   = {}   # contract_id -> {tid, buy_price, ...}
@@ -1466,7 +1503,14 @@ async def _deriv_bot_async(ss: SessionState, token: str, valor_brl: float,
 
                 ss.log(f"✅ Conta {loginid} ({tipo}) autenticada!", "win")
                 ss.log(f"💰 Saldo inicial: {saldo0:.2f} {currency}", "info")
-                ss.update_estado(saldo=saldo0, conectado=True)
+                # saldo_inicial + stop_diario_pct mandados 1x — front calcula a
+                # barra de exposição localmente a cada update de "saldo" (já
+                # streamado em todo resultado de trade), sem precisar
+                # rebroadcastar isso a cada tick (seria spam de WS).
+                ss.update_estado(
+                    saldo=saldo0, conectado=True,
+                    saldo_inicial=saldo0, stop_diario_pct=config["stop_diario_pct"],
+                )
                 _attempt = 0  # reset contador ao conectar com sucesso
 
                 # ── CONVERSÃO BRL → MOEDA DA CONTA ────────────────────────
@@ -1602,6 +1646,8 @@ async def _deriv_bot_async(ss: SessionState, token: str, valor_brl: float,
                 # ── LIQUIDAR CONTRATO (função local reutilizável) ────────
                 def _liquidar(cid):
                     nonlocal wins, losses, lucro_total
+                    nonlocal gross_profit_brl, gross_loss_brl
+                    nonlocal cur_streak, best_win_streak, worst_loss_streak
                     info = active_cx.pop(cid, None)
                     if not info:
                         return
@@ -1625,17 +1671,42 @@ async def _deriv_bot_async(ss: SessionState, token: str, valor_brl: float,
                         wins        += 1
                         lucro_total += profit
                         profit_brl   = profit * rate_brl
+                        gross_profit_brl += profit_brl
+                        cur_streak    = cur_streak + 1 if cur_streak >= 0 else 1
+                        best_win_streak = max(best_win_streak, cur_streak)
                         ss.log(f"✅ WIN  +R${profit_brl:.2f} | {direction_cx} {entry_price:.5g}→{exit_price:.5g}", "win")
                         ss.resultado(tid, "W", profit, lucro_brl=profit_brl)
                     else:
                         losses      += 1
                         lucro_total -= bp
                         loss_brl     = bp * rate_brl
+                        gross_loss_brl += loss_brl
+                        cur_streak    = cur_streak - 1 if cur_streak <= 0 else -1
+                        worst_loss_streak = min(worst_loss_streak, cur_streak)
                         ss.log(f"❌ LOSS −R${loss_brl:.2f} | {direction_cx} {entry_price:.5g}→{exit_price:.5g}", "loss")
                         ss.resultado(tid, "L", -bp, lucro_brl=-loss_brl)
-                    ss.update_estado(wins=wins, losses=losses, lucro=lucro_total)
+
+                    # ── Métricas "pro" (painel de performance) ────────────
+                    _saldo_atual_brl = (ss.estado_snap.get("saldo", saldo0) * rate_brl
+                                        if currency != "BRL" else ss.estado_snap.get("saldo", saldo0))
+                    equity_curve.append({"ts": time.time(), "saldo": round(_saldo_atual_brl, 2)})
+                    if len(equity_curve) > 100:
+                        equity_curve.pop(0)
+                    _profit_factor = (
+                        round(gross_profit_brl / gross_loss_brl, 2) if gross_loss_brl > 0
+                        else None  # sem loss ainda — não dá pra calcular (não é "infinito" no JSON)
+                    )
+                    ss.update_estado(
+                        wins=wins, losses=losses, lucro=lucro_total,
+                        profit_factor=_profit_factor,
+                        max_drawdown_pct=_calc_max_drawdown_pct(equity_curve),
+                        cur_streak=cur_streak,
+                        best_win_streak=best_win_streak,
+                        worst_loss_streak=worst_loss_streak,
+                        equity_curve=equity_curve,
+                    )
                     # ── Gravar no trade journal ───────────────────────────
-                    _log_trade({
+                    _trade_record = {
                         "ts":         datetime.utcnow().isoformat(),
                         "event":      "close",
                         "trade_id":   tid,
@@ -1645,7 +1716,11 @@ async def _deriv_bot_async(ss: SessionState, token: str, valor_brl: float,
                         "exit":       exit_price,
                         "result":     "WIN" if won else "LOSS",
                         "profit_brl": round((payout_est - bp if won else -bp) * rate_brl, 2),
-                    })
+                    }
+                    _log_trade(_trade_record)
+                    ss.trade_log.append(_trade_record)
+                    if len(ss.trade_log) > 500:
+                        ss.trade_log.pop(0)
                     # ── Aprendizado adaptativo ────────────────────────────
                     # Registra resultado por ativo para ajustar threshold
                     perf[asset_cx]["hist"].append(1 if won else 0)
@@ -2731,6 +2806,35 @@ def api_estado():
     sid = session.get("sid", "")
     ss  = get_or_create_session(sid)
     return jsonify(ss.estado_snap)
+
+
+@app.route("/api/export/trades.csv")
+@login_required
+def export_trades_csv():
+    """
+    Exporta o histórico de trades DESTA sessão (ss.trade_log — in-memory,
+    só os fechamentos/resultados, não os sinais). NUNCA lê o
+    logs/trades.jsonl compartilhado direto — aquele arquivo mistura todas
+    as sessões/usuários sem campo de user_id, leria operação de outra
+    pessoa numa rota que devia ser só do usuário logado.
+    """
+    sid = session.get("sid", "")
+    ss  = get_or_create_session(sid)
+    buf = io.StringIO()
+    writer = csv.writer(buf)
+    writer.writerow(["data_hora_utc", "ativo", "direcao", "entrada", "saida", "resultado", "lucro_brl"])
+    for t in ss.trade_log:
+        writer.writerow([
+            t.get("ts", ""), t.get("asset", ""), t.get("direction", ""),
+            t.get("entry", ""), t.get("exit", ""), t.get("result", ""),
+            t.get("profit_brl", ""),
+        ])
+    filename = f"profit-cash-trades-{datetime.now(timezone.utc).strftime('%Y%m%d-%H%M')}.csv"
+    return Response(
+        buf.getvalue(),
+        mimetype="text/csv",
+        headers={"Content-Disposition": f"attachment; filename={filename}"},
+    )
 
 
 @app.route("/api/start", methods=["POST"])
