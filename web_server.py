@@ -1084,6 +1084,11 @@ async def _deriv_bot_async(ss: SessionState, token: str, valor_brl: float,
     tick_buf    = {a: [] for a in ASSETS}
     last_trade  = {a: 0.0 for a in ASSETS}
     active_cx   = {}   # contract_id -> {tid, buy_price, ...}
+    # Resultado decidido LOCALMENTE (via tick cru, _liquidar) por contract_id —
+    # usado só para comparar com o resultado OFICIAL que chega depois via
+    # proposal_open_contract (Fase 4: confirm_contract_result). Nunca é a
+    # fonte de verdade para martingale/saldo — só auditoria/divergência.
+    settled_local = {}  # contract_id -> {"won": bool, "ts": float}
     pending_p   = {}   # req_id (int) -> {asset, direction, conf, motivo}
     req_ctr     = [0]  # inteiro mutable via lista (closure)
     trade_count = 0
@@ -1119,19 +1124,36 @@ async def _deriv_bot_async(ss: SessionState, token: str, valor_brl: float,
 
     # ── MARTINGALE ────────────────────────────────────────────────────────────
     # Base: R$5 convertido para moeda da conta.
-    # Após cada LOSS: multiplica por 2.2 (recupera perdas + lucro com payout 92%).
+    # Após cada LOSS: multiplica pelo multiplicador DINÂMICO, calculado a partir
+    # do payout REAL observado na trade que acabou de perder — não mais um 2.2
+    # fixo (que só fazia sentido calibrado para o ~83% de payout típico de
+    # sintéticos; forex real pode ter payout bem diferente por par/sessão).
+    # Fórmula: mult = payout_ratio / (payout_ratio - 1), derivada do limite
+    # r→∞ da soma geométrica de perdas acumuladas — garante que ganhar em
+    # QUALQUER round futuro recupera tudo + lucro mínimo. Capada em
+    # _MART_MULT_MAX para nunca deixar payout muito baixo gerar exposição
+    # explosiva.
     # Após WIN: reseta para o valor base.
-    # Após 5 losses consecutivos (bust): para o bot.
-    #
-    # Sequência com R$5 base (em reais):
-    #   Round 0: R$5.00   Round 1: R$11.00  Round 2: R$24.20
-    #   Round 3: R$53.24  Round 4: R$117.13 Round 5: R$257.69
-    #
-    _MART_BASE_BRL  = valor_brl  # valor base = escolha do usuário (padrão R$2.50)
-    _MART_MULT      = 2.2        # multiplicador por round de loss
-    _MART_MAX_ROUND = 3          # máximo de rounds antes de parar (bust)
-    mart_round      = [0]     # round atual (lista para ser mutável em closures)
-    mart_stake_curr = [0.0]   # stake atual na moeda da conta (calculado após auth)
+    # Após N losses consecutivos (bust): para o bot.
+    _MART_BASE_BRL    = valor_brl  # valor base = escolha do usuário (padrão R$2.50)
+    _MART_MULT_DEFAULT = 2.2       # usado no 1º round de cada ciclo (ainda sem payout observado)
+    _MART_MULT_MAX      = 3.0      # teto de exposição — nunca passar disso
+    _MART_MAX_ROUND      = 3       # máximo de rounds antes de parar (bust)
+    mart_round       = [0]      # round atual (lista para ser mutável em closures)
+    mart_stake_curr  = [0.0]    # stake atual na moeda da conta (calculado após auth)
+    mart_mults       = []       # multiplicadores REAIS usados em cada round deste ciclo
+    mart_total_lost_brl = [0.0] # total perdido no ciclo atual (BRL) — para log de bust
+
+    def _mart_mult_dynamic(payout_ratio: float) -> float:
+        """
+        mult necessário para recuperar perdas acumuladas + lucro mínimo,
+        dado o payout_ratio (payout/stake) REAL da última trade perdida.
+        payout_ratio <= 1.0 (sem edge ou dado inválido) → usa o teto direto,
+        mais conservador que tentar dividir por zero/negativo.
+        """
+        if payout_ratio <= 1.0:
+            return _MART_MULT_MAX
+        return min(payout_ratio / (payout_ratio - 1.0), _MART_MULT_MAX)
     # Recuperação imediata: após LOSS guarda {direction, asset} para re-entrar
     # na próxima vela sem esperar novo sinal (bypass de todos os filtros)
     recovery_pending = {a: None for a in ASSETS}  # None ou 'CALL'/'PUT'
@@ -1249,15 +1271,31 @@ async def _deriv_bot_async(ss: SessionState, token: str, valor_brl: float,
 
                 # ── MARTINGALE: calcular stake base na moeda da conta ─────
                 def _mart_stake(rnd: int) -> float:
-                    """Retorna o stake em moeda da conta para o round N."""
-                    brl = _MART_BASE_BRL * (_MART_MULT ** rnd)
+                    """
+                    Retorna o stake em moeda da conta para o round N, usando os
+                    multiplicadores REAIS observados em cada round anterior
+                    (mart_mults) — não mais um _MART_MULT fixo. Rounds sem
+                    multiplicador observado ainda (ex: round 0→1 no primeiro
+                    ciclo) usam _MART_MULT_DEFAULT como fallback.
+                    """
+                    brl = _MART_BASE_BRL
+                    for i in range(rnd):
+                        m = mart_mults[i] if i < len(mart_mults) else _MART_MULT_DEFAULT
+                        brl *= m
                     if currency == "BRL":
                         return round(brl, 2)
                     return max(round(brl / rate_brl, 2), 0.35)
 
+                def _curr_stake_brl() -> float:
+                    """BRL equivalente do stake ATUAL (mart_stake_curr[0]) — usado
+                    só para exibição em log, fonte da verdade é mart_stake_curr[0]
+                    na moeda real da conta."""
+                    return mart_stake_curr[0] if currency == "BRL" else mart_stake_curr[0] * rate_brl
+
                 mart_stake_curr[0] = _mart_stake(0)
                 ss.log(f"💱 R${_MART_BASE_BRL:.2f} base → {currency} {mart_stake_curr[0]:.2f} "
-                       f"| Martingale x{_MART_MULT} até {_MART_MAX_ROUND} rounds", "info")
+                       f"| Martingale dinâmico (mult calculado pelo payout real, "
+                       f"teto {_MART_MULT_MAX}x) até {_MART_MAX_ROUND} rounds", "info")
 
                 # ── DESCOBERTA DE DURAÇÃO REAL POR ATIVO (Fase 2) ─────────
                 # PRECISA rodar antes de qualquer subscribe (balance/ticks) —
@@ -1326,7 +1364,7 @@ async def _deriv_bot_async(ss: SessionState, token: str, valor_brl: float,
                         "underlying_symbol": asset,
                     }))
                     aname = ASSET_NAMES.get(asset, asset)
-                    _brl_now = _MART_BASE_BRL * (_MART_MULT ** mart_round[0])
+                    _brl_now = _curr_stake_brl()
                     ss.log(
                         f"📡 {direction} {aname} | "
                         f"Round {mart_round[0]} | R${_brl_now:.2f} ({currency} {_amount:.2f})"
@@ -1354,6 +1392,7 @@ async def _deriv_bot_async(ss: SessionState, token: str, valor_brl: float,
                     exit_price = ticks[-1]
                     won = (exit_price > entry_price if direction_cx == "CALL"
                            else exit_price < entry_price)
+                    settled_local[cid] = {"won": won, "ts": time.time()}
                     if won:
                         profit       = payout_est - bp
                         wins        += 1
@@ -1414,8 +1453,10 @@ async def _deriv_bot_async(ss: SessionState, token: str, valor_brl: float,
 
                     # ── MARTINGALE: ajustar stake para próxima operação ───
                     if won:
-                        # WIN → reseta ciclo e limpa recuperação pendente
+                        # WIN → reseta ciclo, limpa histórico de multiplicadores e recuperação
                         mart_round[0] = 0
+                        mart_mults.clear()
+                        mart_total_lost_brl[0] = 0.0
                         mart_stake_curr[0] = _mart_stake(0)
                         recovery_pending[asset_cx] = None
                         ss.log(
@@ -1424,27 +1465,31 @@ async def _deriv_bot_async(ss: SessionState, token: str, valor_brl: float,
                             "win"
                         )
                     else:
-                        # LOSS → avança round
+                        # LOSS → registra o stake perdido, calcula multiplicador
+                        # dinâmico a partir do payout REAL desta trade, avança round
+                        mart_total_lost_brl[0] += _curr_stake_brl()
+                        _payout_ratio = (payout_est / bp) if bp > 0 else 0.0
+                        _mult_din = _mart_mult_dynamic(_payout_ratio)
+                        mart_mults.append(_mult_din)
+
                         mart_round[0] += 1
                         if mart_round[0] > _MART_MAX_ROUND:
-                            _brl_lost = _MART_BASE_BRL * sum(
-                                _MART_MULT ** r for r in range(_MART_MAX_ROUND + 1)
-                            )
                             ss.log(
                                 f"🛑 MARTINGALE BUST após {_MART_MAX_ROUND} losses "
-                                f"(~R${_brl_lost:.0f} de exposição). Bot pausado.",
+                                f"(~R${mart_total_lost_brl[0]:.0f} de exposição). Bot pausado.",
                                 "loss"
                             )
                             ss.stop_evt.set()
                         else:
                             mart_stake_curr[0] = _mart_stake(mart_round[0])
-                            _brl_next = _MART_BASE_BRL * (_MART_MULT ** mart_round[0])
+                            _brl_next = _curr_stake_brl()
                             # Ativa recuperação imediata: re-entra na mesma direção
                             # na próxima vela sem esperar novo sinal
                             recovery_pending[asset_cx] = direction_cx
                             ss.log(
                                 f"📈 Martingale Round {mart_round[0]}/{_MART_MAX_ROUND} | "
                                 f"Próxima: R${_brl_next:.2f} ({currency} {mart_stake_curr[0]:.2f}) | "
+                                f"mult {_mult_din:.2f}x (payout real {_payout_ratio:.2f}) | "
                                 f"⚡ Re-entrada imediata {direction_cx}",
                                 "warn"
                             )
@@ -1662,7 +1707,7 @@ async def _deriv_bot_async(ss: SessionState, token: str, valor_brl: float,
                             if saldo0 > 0 and (saldo0 - _saldo_rec) / saldo0 >= config["stop_diario_pct"]:
                                 ss.stop_evt.set()
                                 continue
-                            _brl_rec   = _MART_BASE_BRL * (_MART_MULT ** mart_round[0])
+                            _brl_rec   = _curr_stake_brl()
                             _conf_rec  = 0.85
                             _motivo_rec = (
                                 f"⚡ Martingale Recovery Round {mart_round[0]} | "
@@ -1789,7 +1834,7 @@ async def _deriv_bot_async(ss: SessionState, token: str, valor_brl: float,
 
                         aname  = ASSET_NAMES.get(asset, asset)
                         _mart_info = (f"Round {mart_round[0]} | "
-                                      f"R${_MART_BASE_BRL * (_MART_MULT ** mart_round[0]):.2f}")
+                                      f"R${_curr_stake_brl():.2f}")
                         motivo = (f"BB Squeeze {'↑ CALL' if direction=='CALL' else '↓ PUT'} | "
                                   f"Tendência {trend} | 3 velas ✓ | "
                                   f"squeeze {squeeze_ratio*100:.0f}% | "
@@ -1812,7 +1857,7 @@ async def _deriv_bot_async(ss: SessionState, token: str, valor_brl: float,
                             "conf":         round(conf, 4),
                             "squeeze_ratio":round(squeeze_ratio, 3),
                             "mart_round":   mart_round[0],
-                            "mart_stake_brl": round(_MART_BASE_BRL * (_MART_MULT ** mart_round[0]), 2),
+                            "mart_stake_brl": round(_curr_stake_brl(), 2),
                             "tick_speed":   tick_speed,
                             "price":        buf[-1],
                         })
@@ -1900,6 +1945,41 @@ async def _deriv_bot_async(ss: SessionState, token: str, valor_brl: float,
                             }
                             ss.log(f"✅ Contrato #{cid} aberto — R${valor_brl:.2f} "
                                    f"({direction_cx} @ {entry_price:.5g})", "win")
+                            # Fase 4: assina o resultado OFICIAL em paralelo ao
+                            # _liquidar local (que decide por tick cru, mais
+                            # responsivo p/ UX) — usado só para auditar
+                            # divergência, nunca substitui a decisão local.
+                            await dws.send(json.dumps({
+                                "proposal_open_contract": 1,
+                                "contract_id": int(cid),
+                                "subscribe": 1,
+                            }))
+                        continue
+
+                    # ── RESULTADO OFICIAL (Fase 4 — auditoria) ────────────
+                    # Chega de forma assíncrona via subscription aberta acima.
+                    # Só compara com o que o _liquidar já decidiu localmente;
+                    # nunca re-executa martingale/saldo a partir daqui — isso
+                    # continua sendo decisão exclusiva do _liquidar (tick cru,
+                    # mais responsivo). Aqui é só sinal de alerta se divergir.
+                    if mtype == "proposal_open_contract":
+                        poc = msg.get("proposal_open_contract", {})
+                        if poc.get("is_sold"):
+                            _cid_oficial = str(poc.get("contract_id", ""))
+                            _won_oficial = float(poc.get("profit", 0)) > 0
+                            _local = settled_local.get(_cid_oficial)
+                            if _local is not None and _local["won"] != _won_oficial:
+                                ss.log(
+                                    f"⚠️ DIVERGÊNCIA contrato #{_cid_oficial}: "
+                                    f"local={'WIN' if _local['won'] else 'LOSS'} vs "
+                                    f"oficial={'WIN' if _won_oficial else 'LOSS'} "
+                                    f"(profit real: {poc.get('profit')})",
+                                    "warn"
+                                )
+                            # Limpa entradas antigas (>1h) para não acumular indefinidamente
+                            _cutoff_sl = time.time() - 3600
+                            for _k in [k for k, v in settled_local.items() if v["ts"] < _cutoff_sl]:
+                                settled_local.pop(_k, None)
                         continue
 
 
