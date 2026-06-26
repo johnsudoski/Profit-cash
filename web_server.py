@@ -235,6 +235,62 @@ def is_market_open_now(sym_info: dict) -> bool:
         return False
 
 
+# ── FEED EXTERNO DE PREÇO (Fase 5 — F10, opcional) ───────────────────────────
+# Filtro NÃO-BLOQUEANTE: só soma confiança se a direção do preço externo
+# concordar com o sinal já decidido pelas 3 funções reais — nunca veta uma
+# trade por conta própria, e NUNCA é fonte de preço de execução (Deriv
+# continua sendo a única fonte de verdade para entry/exit). Desligado por
+# padrão (opt-in) — precisa de TWELVEDATA_API_KEY + F10_ENABLED=true.
+TWELVEDATA_API_KEY = os.environ.get("TWELVEDATA_API_KEY", "")
+F10_ENABLED         = os.environ.get("F10_ENABLED", "false").lower() == "true"
+F10_TIMEOUT_SECONDS = float(os.environ.get("F10_TIMEOUT_SECONDS", "3"))
+_F10_FAIL_THRESHOLD  = 5      # falhas consecutivas até desligar temporariamente
+_F10_COOLDOWN_SECS   = 600    # 10min desligado após estourar o threshold
+_f10_circuit = {"failures": 0, "disabled_until": 0.0}
+
+
+def _f10_symbol_map(deriv_symbol: str) -> str:
+    """frxEURUSD -> EUR/USD (formato Twelve Data). Só vale para os pares
+    forex de 6 letras após o prefixo 'frx' — não usado em modo synthetic."""
+    if deriv_symbol.startswith("frx") and len(deriv_symbol) == 9:
+        return f"{deriv_symbol[3:6]}/{deriv_symbol[6:9]}"
+    return deriv_symbol
+
+
+async def fetch_external_price(deriv_symbol: str):
+    """
+    Busca a cotação atual via Twelve Data (REST, urllib em thread — sem nova
+    dependência). Timeout curto + circuit breaker: depois de
+    _F10_FAIL_THRESHOLD falhas seguidas, desliga por _F10_COOLDOWN_SECS e
+    loga só uma vez (quem chama decide o que logar). Retorna float ou None —
+    None nunca bloqueia o sinal principal, só significa "sem voto do F10".
+    """
+    if not F10_ENABLED or not TWELVEDATA_API_KEY:
+        return None
+    now = time.time()
+    if now < _f10_circuit["disabled_until"]:
+        return None
+    symbol = _f10_symbol_map(deriv_symbol)
+
+    def _do_request():
+        url = (f"https://api.twelvedata.com/price?symbol={symbol}"
+               f"&apikey={TWELVEDATA_API_KEY}")
+        with urllib.request.urlopen(url, timeout=F10_TIMEOUT_SECONDS) as resp:
+            return json.loads(resp.read().decode("utf-8"))
+
+    try:
+        data = await asyncio.to_thread(_do_request)
+        price = float(data["price"])
+        _f10_circuit["failures"] = 0
+        return price
+    except Exception:
+        _f10_circuit["failures"] += 1
+        if _f10_circuit["failures"] >= _F10_FAIL_THRESHOLD:
+            _f10_circuit["disabled_until"] = now + _F10_COOLDOWN_SECS
+            _f10_circuit["failures"] = 0
+        return None
+
+
 # ── Ticto / Assinatura ───────────────────────────────────────────────────────
 # TICTO_MODE=open  → todos têm acesso (desenvolvimento / testes)
 # TICTO_MODE=strict → só quem comprou na Ticto tem acesso
@@ -1171,6 +1227,9 @@ async def _deriv_bot_async(ss: SessionState, token: str, valor_brl: float,
     recovery_pending = {a: None for a in ASSETS}  # None ou 'CALL'/'PUT'
     # Sessão de mercado (forex) — evita logar "mercado fechado" a cada tick
     market_closed_logged = {a: False for a in ASSETS}
+    # Fase 5 (F10): histórico curto de cotações externas por ativo, pra
+    # derivar uma direção (last vs first) sem precisar de 1 ponto só.
+    f10_history = {a: [] for a in ASSETS}
 
     def _best_asset():
         """
@@ -1647,6 +1706,18 @@ async def _deriv_bot_async(ss: SessionState, token: str, valor_brl: float,
                                     import traceback
                                     ss.log(f"❌ diagnóstico forex falhou ({asset}): {_e_diag}", "loss")
                                     print(f"[DIAG ERROR] {traceback.format_exc()}", flush=True)
+
+                                # Fase 5 (F10): 1 fetch por ativo a cada 60s já
+                                # respeita o rate-limit gratuito da Twelve Data
+                                # (8 req/min) com folga — 4 ativos = 4 req/min.
+                                if F10_ENABLED:
+                                    try:
+                                        _f10_price = await fetch_external_price(asset)
+                                        if _f10_price is not None:
+                                            f10_history[asset].append((_f10_price, time.time()))
+                                            f10_history[asset] = f10_history[asset][-5:]
+                                    except Exception:
+                                        pass  # F10 nunca pode afetar o loop principal
                             # ── Ranking dinâmico das últimas 2h ──────────────
                             _now_ts  = time.time()
                             _cutoff2 = _now_ts - _TWO_HOURS
@@ -1849,6 +1920,21 @@ async def _deriv_bot_async(ss: SessionState, token: str, valor_brl: float,
                         #                0.65 = limite (conf mínima)
                         conf = min(1.0, 0.95 - squeeze_ratio * 0.50)
 
+                        # ── FILTRO OPCIONAL F10: feed externo (Fase 5) ───────
+                        # NUNCA veta — só soma confiança se a direção do preço
+                        # externo (Twelve Data) concordar com `direction`. Sem
+                        # histórico suficiente ou F10 desligado: vot_f10=None,
+                        # não altera conf em nada.
+                        _f10_vote = None
+                        if F10_ENABLED and len(f10_history[asset]) >= 2:
+                            _f10_first = f10_history[asset][0][0]
+                            _f10_last  = f10_history[asset][-1][0]
+                            if _f10_last != _f10_first:
+                                _f10_dir = "CALL" if _f10_last > _f10_first else "PUT"
+                                _f10_vote = _f10_dir
+                                if _f10_dir == direction:
+                                    conf = min(1.0, conf + 0.05)
+
                         conf_threshold = config["conf_min"] + perf[asset]["conf_adj"]
                         if conf < conf_threshold:
                             continue
@@ -1868,6 +1954,11 @@ async def _deriv_bot_async(ss: SessionState, token: str, valor_brl: float,
                             f"Martingale {_mart_info}",
                             f"Price: {buf[-1]:.5g}",
                         ]
+                        if _f10_vote:
+                            votos.append(
+                                f"F10 (Twelve Data): {_f10_vote} "
+                                f"{'✓ concorda' if _f10_vote == direction else '✗ discorda (não vetou)'}"
+                            )
 
                         ss.sinal(aname, direction, conf, motivo, votos)
                         _log_trade({
