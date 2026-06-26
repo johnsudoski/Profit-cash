@@ -578,11 +578,25 @@ def init_db():
                     (_OWNER_USER, _OWNER_EMAIL, generate_password_hash(_OWNER_PASS))
                 )
             else:
-                # Garantir que sempre seja admin e ativo, mesmo se alterado
-                conn.execute(
-                    "UPDATE users SET is_admin=1, is_active=1, ticto_authorized=1 WHERE email=?",
-                    (_OWNER_EMAIL,)
-                )
+                # Garantir que sempre seja admin e ativo, mesmo se alterado.
+                # A senha também é resincronizada com OWNER_PASSWORD a cada boot
+                # SE essa env var estiver explicitamente configurada no Railway —
+                # antes só a flag is_admin era garantida, então trocar a senha
+                # no Railway não tinha efeito nenhum numa conta já existente
+                # (o hash antigo, de quando a conta foi criada, ficava "presa"
+                # pra sempre, contradizendo o comentário "sempre garante acesso").
+                _owner_pass_env = os.environ.get("OWNER_PASSWORD", "")
+                if _owner_pass_env:
+                    conn.execute(
+                        "UPDATE users SET is_admin=1, is_active=1, ticto_authorized=1, "
+                        "password_hash=? WHERE email=?",
+                        (generate_password_hash(_owner_pass_env), _OWNER_EMAIL)
+                    )
+                else:
+                    conn.execute(
+                        "UPDATE users SET is_admin=1, is_active=1, ticto_authorized=1 WHERE email=?",
+                        (_OWNER_EMAIL,)
+                    )
             conn.commit()
     except Exception as e:
         print(f"[INIT] Aviso ao criar owner: {e}", flush=True)
