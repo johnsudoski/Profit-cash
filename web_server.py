@@ -2,6 +2,7 @@
 Profit Cash — Servidor Web (Deriv API + Multi-User Auth)
 """
 import asyncio, json, os, sqlite3, sys, threading, time, uuid, math, hashlib, hmac
+import urllib.request, urllib.error
 from datetime import datetime, timedelta
 from functools import wraps
 from flask import (Flask, render_template, jsonify, request,
@@ -33,7 +34,67 @@ sock = Sock(app)
 
 # Deriv OAuth — configure DERIV_APP_ID no Railway (env var)
 DERIV_APP_ID = os.environ.get("DERIV_APP_ID", "")
-DERIV_WS     = f"wss://ws.binaryws.com/websockets/v3?app_id={DERIV_APP_ID or '1089'}"
+
+# ── CONEXÃO COM A DERIV (fluxo REST + OTP) ───────────────────────────────────
+# A Deriv descontinuou, para apps registrados no dashboard novo (App ID
+# alfanumérico, tokens "pat_..."), o fluxo antigo de conectar direto em
+# wss://ws.binaryws.com/websockets/v3?app_id=N e mandar {"authorize": token}
+# como primeira mensagem. Confirmado empiricamente (2026-06-25): com o app_id
+# alfanumérico, ws.binaryws.com rejeita a conexão na hora do handshake (HTTP
+# 401) — não chega nem a processar a mensagem de authorize.
+#
+# Fluxo novo (testado e confirmado funcionando, inclusive com R_100/sintético
+# via tick subscribe — o protocolo de mensagens em si NÃO mudou):
+#   1. GET  /trading/v1/options/accounts                  (Bearer token)
+#        -> lista de contas do usuário: [{account_id, balance, currency,
+#           account_type: "demo"|"real", status}, ...]
+#   2. POST /trading/v1/options/accounts/{account_id}/otp (Bearer token)
+#        -> {"data": {"url": "wss://api.derivws.com/.../ws/demo?otp=XXXX"}}
+#   3. Conectar DIRETO nessa URL — já vem autenticada, sem precisar mandar
+#      {"authorize": token} manualmente. Dali em diante, ticks/proposal/buy
+#      funcionam exatamente como antes.
+DERIV_API_BASE = "https://api.derivws.com/trading/v1/options"
+
+
+def _deriv_rest_call(method: str, path: str, token: str) -> dict:
+    """Chamada REST síncrona (roda em thread via asyncio.to_thread) para a
+    API nova da Deriv. Lança Exception com mensagem clara em caso de erro."""
+    req = urllib.request.Request(
+        f"{DERIV_API_BASE}{path}",
+        method=method,
+        headers={
+            "Authorization": f"Bearer {token}",
+            "Deriv-App-ID": DERIV_APP_ID,
+            "Content-Type": "application/json",
+        },
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            return json.loads(resp.read().decode("utf-8"))
+    except urllib.error.HTTPError as e:
+        body = e.read().decode("utf-8", "ignore")
+        raise Exception(f"HTTP {e.code} em {path}: {body[:200]}")
+    except urllib.error.URLError as e:
+        raise Exception(f"falha de rede em {path}: {e}")
+
+
+async def deriv_get_accounts(token: str) -> list:
+    """Lista as contas (demo/real) vinculadas ao token. Substitui o
+    account_list que antes vinha embutido na resposta de authorize."""
+    data = await asyncio.to_thread(_deriv_rest_call, "GET", "/accounts", token)
+    return data.get("data", [])
+
+
+async def deriv_get_authenticated_ws_url(token: str, account_id: str) -> str:
+    """Pede o OTP de curta duração e devolve a URL de WebSocket já pronta
+    e autenticada para essa conta específica."""
+    data = await asyncio.to_thread(
+        _deriv_rest_call, "POST", f"/accounts/{account_id}/otp", token
+    )
+    url = data.get("data", {}).get("url")
+    if not url:
+        raise Exception(f"resposta sem URL: {data}")
+    return url
 
 # ── Ticto / Assinatura ───────────────────────────────────────────────────────
 # TICTO_MODE=open  → todos têm acesso (desenvolvimento / testes)
@@ -963,6 +1024,13 @@ async def _deriv_bot_async(ss: SessionState, token: str, valor_brl: float,
     ss.log("Conectando à Deriv…", "info")
     ss.update_estado(rodando=True)
 
+    if not DERIV_APP_ID:
+        ss.log("❌ DERIV_APP_ID não configurado.", "loss")
+        ss.log("→ Registre um app em api.deriv.com/dashboard (tipo Native/PAT) "
+               "e configure DERIV_APP_ID no Railway.", "warn")
+        ss.update_estado(rodando=False, conectado=False)
+        return
+
     _max_reconnects = 5
     for _attempt in range(_max_reconnects):
         if ss.stop_evt.is_set():
@@ -974,52 +1042,50 @@ async def _deriv_bot_async(ss: SessionState, token: str, valor_brl: float,
             if ss.stop_evt.is_set():
                 break
         try:
+            # ── DESCOBRIR CONTAS + PEGAR URL AUTENTICADA (fluxo REST+OTP) ──
+            # Substitui o antigo {"authorize": token} em banda — a Deriv não
+            # aceita mais esse padrão para apps do dashboard novo (ver
+            # comentário em deriv_get_accounts/deriv_get_authenticated_ws_url).
+            try:
+                accounts = await deriv_get_accounts(token)
+            except Exception as e:
+                ss.log(f"❌ Falha ao listar contas Deriv: {e}", "loss")
+                ss.log("→ Verifique o token em app.deriv.com → Conta → Token API", "warn")
+                ss.log("→ Precisa ter permissão 'Trade' ativada", "warn")
+                break  # token/app_id inválido — não tenta reconectar
+
+            if not accounts:
+                ss.log("❌ Nenhuma conta encontrada para esse token.", "loss")
+                break
+
+            wanted_type = "demo" if want_demo else "real"
+            chosen = next((a for a in accounts
+                           if a.get("account_type") == wanted_type
+                           and a.get("status") == "active"), None)
+            if not chosen:
+                tipo_str = "Demo 🧪" if want_demo else "Real 💰"
+                ss.log(f"⚠️ Conta {tipo_str} não encontrada. Usando a primeira ativa.", "warn")
+                chosen = next((a for a in accounts if a.get("status") == "active"), None)
+            if not chosen:
+                ss.log("❌ Nenhuma conta ativa disponível para esse token.", "loss")
+                break
+
+            account_id = chosen["account_id"]
+            try:
+                ws_url = await deriv_get_authenticated_ws_url(token, account_id)
+            except Exception as e:
+                ss.log(f"❌ Falha ao obter sessão autenticada: {e}", "loss")
+                break
+
             async with websockets.connect(
-                DERIV_WS, ping_interval=20, ping_timeout=30, open_timeout=20
+                ws_url, ping_interval=20, ping_timeout=30, open_timeout=20
             ) as dws:
                 ss.log("✅ WebSocket estabelecido.", "info")
 
-                # ── AUTORIZAÇÃO ───────────────────────────────────────────
-                await dws.send(json.dumps({"authorize": token}))
-                raw  = await asyncio.wait_for(dws.recv(), timeout=20)
-                auth = json.loads(raw)
-
-                if "error" in auth:
-                    err = auth["error"].get("message", "Token inválido")
-                    ss.log(f"❌ Autenticação falhou: {err}", "loss")
-                    ss.log("→ Verifique o token em app.deriv.com → Conta → Token API", "warn")
-                    ss.log("→ Precisa ter permissão 'Trade' ativada", "warn")
-                    break  # token inválido — não tenta reconectar
-
-                acct    = auth.get("authorize", {})
-                is_virt = bool(acct.get("is_virtual", False))
-
-                # ── TROCA DE CONTA (Demo ↔ Real) ──────────────────────────
-                if want_demo != is_virt:
-                    acct_list = acct.get("account_list", [])
-                    targets = [a for a in acct_list
-                               if bool(a.get("is_virtual", False)) == want_demo
-                               and a.get("token")]
-                    if targets:
-                        new_token = targets[0]["token"]
-                        tipo_str  = "Demo 🧪" if want_demo else "Real 💰"
-                        ss.log(f"🔄 Alternando para conta {tipo_str}…", "info")
-                        await dws.send(json.dumps({"authorize": new_token}))
-                        raw2  = await asyncio.wait_for(dws.recv(), timeout=20)
-                        auth2 = json.loads(raw2)
-                        if "error" not in auth2:
-                            acct    = auth2.get("authorize", {})
-                            is_virt = bool(acct.get("is_virtual", False))
-                        else:
-                            ss.log("⚠️ Falha ao trocar conta, continuando com a atual.", "warn")
-                    else:
-                        tipo_str = "Demo 🧪" if want_demo else "Real 💰"
-                        ss.log(f"⚠️ Conta {tipo_str} não encontrada. Usando a atual.", "warn")
-
-                loginid  = acct.get("loginid", "?")
-                saldo0   = float(acct.get("balance", 0))
-                currency = acct.get("currency", "USD")
-                is_virt  = bool(acct.get("is_virtual", False))
+                loginid  = account_id
+                saldo0   = float(chosen.get("balance", 0))
+                currency = chosen.get("currency", "USD")
+                is_virt  = chosen.get("account_type") == "demo"
                 tipo     = "Demo 🧪" if is_virt else "Real 💰"
 
                 ss.log(f"✅ Conta {loginid} ({tipo}) autenticada!", "win")
